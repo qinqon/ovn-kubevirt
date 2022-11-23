@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ovn-kubevirt
+  labels:
+    app: ovn-kubevirt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ovn-kubevirt
+  template:
+    metadata:
+      labels:
+        app: ovn-kubevirt
+    spec:
+      hostNetwork: true
+      containers:
+      - name: ovs-server
+        image: quay.io/ellorent/ovn-kubevirt
+        args:
+          - "/ovnkube.sh"
+          - "ovs-server"
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - mountPath: /var/run/openvswitch
+            name: host-var-run-openvswitch
+          - mountPath: /var/log/openvswitch
+            name: host-var-log-openvswitch
+          - mountPath: /lib/modules
+            name: host-lib-modules
+      - name: ovn-controller
+        image: quay.io/ellorent/ovn-kubevirt
+        args:
+          - "/ovnkube.sh"
+          - "ovn-controller"
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - mountPath: /var/run/openvswitch
+            name: host-var-run-openvswitch
+          - mountPath: /var/log/openvswitch
+            name: host-var-log-openvswitch
+          - mountPath: /var/run/ovn
+            name: host-var-run-ovn
+      - name: northd
+        image: quay.io/ellorent/ovn-kubevirt
+        args:
+          - "/ovnkube.sh"
+          - "run-ovn-northd"
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - mountPath: /var/run/openvswitch
+            name: host-var-run-openvswitch
+          - mountPath: /var/log/openvswitch
+            name: host-var-log-openvswitch
+          - mountPath: /var/run/ovn
+            name: host-var-run-ovn
+      - name: nb-ovsdb
+        image: quay.io/ellorent/ovn-kubevirt
+        env:
+        - name: K8S_NODE_IP                                                     
+          valueFrom:                                                            
+            fieldRef:                                                           
+              fieldPath: status.hostIP  
+        args:
+          - "/ovnkube.sh"
+          - "nb-ovsdb"
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - mountPath: /var/run/openvswitch
+            name: host-var-run-openvswitch
+          - mountPath: /var/log/openvswitch
+            name: host-var-log-openvswitch
+          - mountPath: /var/run/ovn
+            name: host-var-run-ovn
+      - name: sb-ovsdb
+        image: quay.io/ellorent/ovn-kubevirt
+        env:
+        - name: K8S_NODE_IP                                                     
+          valueFrom:                                                            
+            fieldRef:                                                           
+              fieldPath: status.hostIP  
+        args:
+          - "/ovnkube.sh"
+          - "sb-ovsdb"
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - mountPath: /var/run/openvswitch
+            name: host-var-run-openvswitch
+          - mountPath: /var/log/openvswitch
+            name: host-var-log-openvswitch
+          - mountPath: /var/run/ovn
+            name: host-var-run-ovn
+      volumes:
+        - name: host-var-run-openvswitch
+          hostPath:
+            path: /var/run/openvswitch
+        - name: host-var-log-openvswitch
+          hostPath:
+            path: /var/log/openvswitch
+        - name: host-var-run-ovn
+          hostPath:
+            path: /var/run/ovn
+        - name: host-lib-modules
+          hostPath:
+            path: /lib/modules

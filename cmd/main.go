@@ -84,6 +84,24 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
+	// A plugin can be either an "originating" plugin or a "chained" plugin.
+	// Originating plugins perform initial sandbox setup and do not require
+	// any result from a previous plugin in the chain. A chained plugin
+	// modifies sandbox configuration that was previously set up by an
+	// originating plugin and may optionally require a PrevResult from
+	// earlier plugins in the chain.
+
+	// START chained plugin code
+	if cniConf.PrevResult == nil {
+		return fmt.Errorf("must be called chained with ovs plugin")
+	}
+
+	// Convert the PrevResult to a concrete Result type that can be modified.
+	_, err = current.GetResult(cniConf.PrevResult)
+	if err != nil {
+		return fmt.Errorf("failed to convert prevResult: %v", err)
+	}
+
 	cli, err := newClient()
 	if err != nil {
 		return err
@@ -119,7 +137,6 @@ func cmdDel(args *skel.CmdArgs) error {
 	if err := libovsdbops.DeleteLogicalSwitch(cli, cniConf.Name); err != nil {
 		return err
 	}
-
 	return nil
 }
 

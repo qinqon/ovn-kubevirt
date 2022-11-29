@@ -51,6 +51,7 @@ metadata:
 spec:
   imagePullPolicy: IfNotPresent
   multus: {}
+  ovs: {}
 EOF
     kubectl wait networkaddonsconfig cluster --for condition=Available --timeout=2m
 }
@@ -68,6 +69,7 @@ function install-cni-plugin(){
     for node in $(kubectl get node --no-headers  -o custom-columns=":metadata.name")   
     do
         docker cp ${OUTPUT_DIR}/${PLUGIN_NAME}  ${node}:${CNI_DIR}
+        docker cp hack/ovs-vsctl.sh  ${node}:/usr/local/bin/ovs-vsctl
     done
 }
 
@@ -81,7 +83,7 @@ function run() {
     install-calico
     install-ovn-kubevirt
     install-network-operators
-    #install-kubevirt
+    install-kubevirt
 }
 
 $1

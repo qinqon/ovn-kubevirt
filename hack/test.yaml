@@ -8,21 +8,56 @@ spec:
     {
         "cniVersion": "0.4.0",
         "name": "ovn-kubevirt",
-        "plugins": [{
+        "plugins": [
+          {
+            "type": "ovs",
+            "bridge": "br-int"
+          },
+          {
             "type": "ovn-kubevirt",
             "anotherAwesomeArg": "foobar"
-        }]
+          }
+    ]
     }
 ---
-apiVersion: v1
-kind: Pod
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstance
 metadata:
-  name: nginx
-  annotations:
-    k8s.v1.cni.cncf.io/networks: '[{"interface":"net1","name":"ovn-kubevirt"}]'
+  labels:
+    special: ovn-kubevirt
+  name: ovn-kubevirt
 spec:
-  containers:
-  - name: nginx
-    image: nginx:1.14.2
-    ports:
-    - containerPort: 80
+  domain:
+    devices:
+      disks:
+      - disk:
+          bus: virtio
+        name: containerdisk
+      - disk:
+          bus: virtio
+        name: cloudinitdisk
+      interfaces:
+      - masquerade: {}
+        name: pod
+      - bridge: {}
+        name: multus 
+    resources:
+      requests:
+        memory: 128Mi
+  networks:
+  - name: pod
+    pod: {}
+  - name: multus
+    multus:
+      networkName: ovn-kubevirt
+  terminationGracePeriodSeconds: 0
+  volumes:
+  - containerDisk:
+      image: quay.io/kubevirtci/alpine-with-test-tooling-container-disk:2211290730-4eb880c
+    name: containerdisk
+  - cloudInitNoCloud:
+      userData: |-
+        #cloud-config
+        password: fedora
+        chpasswd: { expire: False }
+    name: cloudinitdisk

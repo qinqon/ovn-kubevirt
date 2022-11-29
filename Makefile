@@ -22,9 +22,6 @@ test: install
 plugin:
 	hack/kind.sh build-cni-plugin
 
-gen:
-	hack/kind.sh generate-nb-scheme
-
 sync: delete apply
 logs:
 	kubectl logs -l app=ovn-kubevirt --all-containers --tail=100000

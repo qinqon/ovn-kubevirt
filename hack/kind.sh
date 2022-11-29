@@ -71,15 +71,6 @@ function install-cni-plugin(){
     done
 }
 
-function generate-nb-scheme() {
-    (
-        cd ${ROOT_DIR}        
-        ovsdb-client get-schema "tcp:172.18.0.2:6641" > ${OUTPUT_DIR}/ovsnb.schema
-        go install github.com/ovn-org/libovsdb/cmd/modelgen
-        modelgen -p ovsnb -o cmd/ovsnb .out/ovsnb.schema
-    )
-}
-
 function run() {
     mkdir -p $OUTPUT_DIR
     if kind get clusters | grep "${KIND_CLUSTER_NAME}"; then

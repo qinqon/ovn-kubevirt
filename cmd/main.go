@@ -28,9 +28,10 @@ import (
 
 	"github.com/ovn-org/libovsdb/client"
 
-	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 
-	ovsnb "github.com/qinqon/ovn-kubevirt/cmd/ovsnb"
+	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
 
 // PluginConf is whatever you expect your configuration json to be. This is whatever
@@ -93,32 +94,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	lsp := &ovsnb.LogicalSwitchPort{Name: cniConf.Name}
-	ops, err := cli.Create(lsp)
-	if err != nil {
-		return err
-	}
-
-	_, err = cli.Transact(context.Background(), ops...)
-	if err != nil {
-		return err
-	}
-
-	//if err := cli.Get(context.Background(), lsp); err != nil {
-	//	return fmt.Errorf("failed geting lsp: %v", err)
-	//}
-
-	ls := &ovsnb.LogicalSwitch{
-		Name:  cniConf.Name,
-		Ports: []string{lsp.Name},
-	}
-	ops, err = cli.Create(ls)
-	if err != nil {
-		return err
-	}
-
-	_, err = cli.Transact(context.Background(), ops...)
-	if err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(cli, &nbdb.LogicalSwitch{Name: cniConf.Name}, &nbdb.LogicalSwitchPort{Name: cniConf.Name}); err != nil {
 		return err
 	}
 
@@ -137,32 +113,13 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
-	lsps := []*ovsnb.LogicalSwitchPort{}
-	if err := cli.Where(&ovsnb.LogicalSwitchPort{Name: cniConf.Name}).List(context.Background(), lsps); err != nil {
+	if err := libovsdbops.DeleteLogicalSwitchPorts(cli, &nbdb.LogicalSwitch{Name: cniConf.Name}, &nbdb.LogicalSwitchPort{Name: cniConf.Name}); err != nil {
 		return err
 	}
-	if len(lsps) > 0 {
-		ops, err := cli.WhereAll(lsps).Delete()
-		if err != nil {
-			return err
-		}
-		if _, err := cli.Transact(context.Background(), ops...); err != nil {
-			return err
-		}
-	}
-	lss := []*ovsnb.LogicalSwitch{}
-	if err := cli.Where(&ovsnb.LogicalSwitch{Name: cniConf.Name}).List(context.Background(), lss); err != nil {
+	if err := libovsdbops.DeleteLogicalSwitch(cli, cniConf.Name); err != nil {
 		return err
 	}
-	if len(lss) > 0 {
-		ops, err := cli.WhereAll(lss).Delete()
-		if err != nil {
-			return err
-		}
-		if _, err := cli.Transact(context.Background(), ops...); err != nil {
-			return err
-		}
-	}
+
 	return nil
 }
 
@@ -176,7 +133,7 @@ func main() {
 }
 
 func newClient() (client.Client, error) {
-	ovsNbModel, err := ovsnb.FullDatabaseModel()
+	ovsNbModel, err := nbdb.FullDatabaseModel()
 	if err != nil {
 		return nil, err
 	}

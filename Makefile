@@ -5,12 +5,25 @@ build:
 push: build
 	docker push quay.io/ellorent/ovn-kubevirt
 run: 
-	hack/kind.sh
+	hack/kind.sh run
 apply:
 	kubectl apply -f ovn-kubevirt.yaml
 
 delete: 
 	kubectl delete -f ovn-kubevirt.yaml
+
+install: plugin
+	hack/kind.sh install-cni-plugin
+
+test: install
+	kubectl delete --ignore-not-found -f hack/test.yaml
+	kubectl apply -f hack/test.yaml
+
+plugin:
+	hack/kind.sh build-cni-plugin
+
+gen:
+	hack/kind.sh generate-nb-scheme
 
 sync: delete apply
 logs:

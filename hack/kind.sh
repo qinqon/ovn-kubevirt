@@ -5,12 +5,17 @@ DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 set -euxo pipefail
 
-OUTPUT_DIR=${DIR}/../.out
+ROOT_DIR=${DIR}/../
+OUTPUT_DIR=${ROOT_DIR}/.out
+CNI_DIR=/opt/cni/bin
+PLUGIN_NAME=ovn-kubevirt
 KIND_CLUSTER_NAME=ovn-kubevirt
 KIND_IMAGE=${KIND_IMAGE:-kindest/node}
 K8S_VERSION=${K8S_VERSION:-v1.24.0}
 CALICO_VERSION=${CALICO_VERSION:-v3.24.5}
+CNAO_VERSION=${CNAO_VERSION:-v0.78.0}
 KIND_CONFIG=${KIND_CONFIG:-${DIR}/kind-config.yaml}
+KUBERNETES_NMSTATE_VERSION=${KUBERNETES_NMSTATE_VERSION:-v0.74.0}
 export KUBECONFIG=$OUTPUT_DIR/kubeconfig
 
 function install-kubevirt() {
@@ -32,12 +37,60 @@ function install-ovn-kubevirt() {
     kubectl rollout status deployment/ovn-kubevirt
 }
 
-mkdir -p $OUTPUT_DIR
-if kind get clusters | grep "${KIND_CLUSTER_NAME}"; then
-  kind delete cluster --name "${KIND_CLUSTER_NAME}"
-fi
-kind create cluster --name "${KIND_CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}" --image "${KIND_IMAGE}":"${K8S_VERSION}" --config=${KIND_CONFIG} --retain
+function install-network-operators() {
+    kubectl apply -f https://github.com/kubevirt/cluster-network-addons-operator/releases/download/${CNAO_VERSION}/namespace.yaml
+    kubectl apply -f https://github.com/kubevirt/cluster-network-addons-operator/releases/download/${CNAO_VERSION}/network-addons-config.crd.yaml
+    kubectl apply -f https://github.com/kubevirt/cluster-network-addons-operator/releases/download/${CNAO_VERSION}/operator.yaml
+    
+    cat <<EOF | kubectl apply -f -
+---
+apiVersion: networkaddonsoperator.network.kubevirt.io/v1
+kind: NetworkAddonsConfig
+metadata:
+  name: cluster
+spec:
+  imagePullPolicy: IfNotPresent
+  multus: {}
+EOF
+    kubectl wait networkaddonsconfig cluster --for condition=Available --timeout=2m
+}
 
-install-calico
-install-ovn-kubevirt
-#install-kubevirt
+
+function build-cni-plugin() {
+    (
+        cd ${ROOT_DIR}        
+        go build -o ${OUTPUT_DIR}/${PLUGIN_NAME} ./cmd
+	    chmod 755 ${OUTPUT_DIR}/${PLUGIN_NAME}
+    )
+}
+
+function install-cni-plugin(){
+    for node in $(kubectl get node --no-headers  -o custom-columns=":metadata.name")   
+    do
+        docker cp ${OUTPUT_DIR}/${PLUGIN_NAME}  ${node}:${CNI_DIR}
+    done
+}
+
+function generate-nb-scheme() {
+    (
+        cd ${ROOT_DIR}        
+        ovsdb-client get-schema "tcp:172.18.0.2:6641" > ${OUTPUT_DIR}/ovsnb.schema
+        go install github.com/ovn-org/libovsdb/cmd/modelgen
+        modelgen -p ovsnb -o cmd/ovsnb .out/ovsnb.schema
+    )
+}
+
+function run() {
+    mkdir -p $OUTPUT_DIR
+    if kind get clusters | grep "${KIND_CLUSTER_NAME}"; then
+      kind delete cluster --name "${KIND_CLUSTER_NAME}"
+    fi
+    kind create cluster --name "${KIND_CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}" --image "${KIND_IMAGE}":"${K8S_VERSION}" --config=${KIND_CONFIG} --retain
+
+    install-calico
+    install-ovn-kubevirt
+    install-network-operators
+    #install-kubevirt
+}
+
+$1

@@ -44,6 +44,8 @@ spec:
             name: host-var-log-openvswitch
           - mountPath: /var/run/ovn
             name: host-var-run-ovn
+          - mountPath: /lib/modules
+            name: host-lib-modules
       - name: northd
         image: quay.io/ellorent/ovn-kubevirt
         args:
@@ -58,6 +60,8 @@ spec:
             name: host-var-log-openvswitch
           - mountPath: /var/run/ovn
             name: host-var-run-ovn
+          - mountPath: /lib/modules
+            name: host-lib-modules
       - name: nb-ovsdb
         image: quay.io/ellorent/ovn-kubevirt
         env:
@@ -77,6 +81,8 @@ spec:
             name: host-var-log-openvswitch
           - mountPath: /var/run/ovn
             name: host-var-run-ovn
+          - mountPath: /lib/modules
+            name: host-lib-modules
       - name: sb-ovsdb
         image: quay.io/ellorent/ovn-kubevirt
         env:
@@ -96,6 +102,8 @@ spec:
             name: host-var-log-openvswitch
           - mountPath: /var/run/ovn
             name: host-var-run-ovn
+          - mountPath: /lib/modules
+            name: host-lib-modules
       volumes:
         - name: host-var-run-openvswitch
           hostPath:

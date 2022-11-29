@@ -1,0 +1,28 @@
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: "ovn-kubevirt"
+spec:
+  config: >
+    {
+        "cniVersion": "0.4.0",
+        "name": "ovn-kubevirt",
+        "plugins": [{
+            "type": "ovn-kubevirt",
+            "anotherAwesomeArg": "foobar"
+        }]
+    }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  annotations:
+    k8s.v1.cni.cncf.io/networks: '[{"interface":"net1","name":"ovn-kubevirt"}]'
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.14.2
+    ports:
+    - containerPort: 80

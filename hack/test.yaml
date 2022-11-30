@@ -15,7 +15,10 @@ spec:
           },
           {
             "type": "ovn-kubevirt",
-            "anotherAwesomeArg": "foobar"
+            "subnet": "10.0.0.0/24",
+            "exclude-ips": "10.0.0.1..10.0.0.10",
+            "router": "10.0.0.1",
+            "lease-time": "3600"
           }
     ]
     }
@@ -40,7 +43,8 @@ spec:
       - masquerade: {}
         name: pod
       - bridge: {}
-        name: multus 
+        name: multus
+        macAddress: 1a:3c:0f:bf:92:50
     resources:
       requests:
         memory: 128Mi

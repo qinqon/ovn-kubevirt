@@ -1012,6 +1012,8 @@ ovn-controller() {
           --ovn-controller-ssl-ca-cert=${ovn_ca_cert}
       "
   }
+
+  
   run_as_ovs_user_if_needed \
     ${OVNCTL_PATH} --no-monitor start_controller \
     ${ovn_controller_ssl_opts} \
@@ -1023,6 +1025,10 @@ ovn-controller() {
 
   tail --follow=name ${OVN_LOGDIR}/ovn-controller.log &
   controller_tail_pid=$!
+  
+  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-remote=\"unix:/var/run/ovn/ovnsb_db.sock\"
+  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-encap-ip=${POD_IP}
+  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-encap-type=geneve
 
   process_healthy ovn-controller ${controller_tail_pid}
   exit 10

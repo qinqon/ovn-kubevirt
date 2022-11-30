@@ -20,9 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os/exec"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
 
@@ -34,22 +37,17 @@ import (
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
 
-// PluginConf is whatever you expect your configuration json to be. This is whatever
-// is passed in on stdin. Your plugin may wish to expose its functionality via
-// runtime args, see CONVENTIONS.md in the CNI spec.
 type PluginConf struct {
-	// This embeds the standard NetConf structure which allows your plugin
-	// to more easily parse standard fields like Name, Type, CNIVersion,
-	// and PrevResult.
 	types.NetConf
+	Router     string `json:"router"`
+	LeaseTime  string `json:"lease-time"`
+	Subnet     string `json:"subnet"`
+	ExcludeIps string `json:"exclude-ips"`
+}
 
-	RuntimeConfig *struct {
-		SampleConfig map[string]interface{} `json:"sample"`
-	} `json:"runtimeConfig"`
-
-	// Add plugin-specifc flags here
-	MyAwesomeFlag     bool   `json:"myAwesomeFlag"`
-	AnotherAwesomeArg string `json:"anotherAwesomeArg"`
+type ExtraArgs struct {
+	K8S_POD_NAMESPACE, K8S_POD_NAME cnitypes.UnmarshallableString
+	cnitypes.CommonArgs
 }
 
 // parseConfig parses the supplied configuration (and prevResult) from stdin.
@@ -67,18 +65,13 @@ func parseConfig(stdin []byte) (*PluginConf, error) {
 	if err := version.ParsePrevResult(&conf.NetConf); err != nil {
 		return nil, fmt.Errorf("could not parse prevResult: %v", err)
 	}
-	// End previous result parsing
-
-	// Do any validation here
-	if conf.AnotherAwesomeArg == "" {
-		return nil, fmt.Errorf("anotherAwesomeArg must be specified")
-	}
 
 	return &conf, nil
 }
 
 // cmdAdd is called for ADD requests
 func cmdAdd(args *skel.CmdArgs) error {
+	logCall("ADD", args)
 	cniConf, err := parseConfig(args.StdinData)
 	if err != nil {
 		return err
@@ -97,9 +90,18 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	// Convert the PrevResult to a concrete Result type that can be modified.
-	_, err = current.GetResult(cniConf.PrevResult)
+	prevResult, err := current.GetResult(cniConf.PrevResult)
 	if err != nil {
 		return fmt.Errorf("failed to convert prevResult: %v", err)
+	}
+
+	portName, err := composePortNameFromExtraArgs(args.Args)
+	if err != nil {
+		return err
+	}
+
+	if output, err := exec.Command("ovs-vsctl", "add", "Interface", prevResult.Interfaces[0].Name, "external_ids", fmt.Sprintf("iface-id=%s", portName)).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %v", output, err)
 	}
 
 	cli, err := newClient()
@@ -112,7 +114,52 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(cli, &nbdb.LogicalSwitch{Name: cniConf.Name}, &nbdb.LogicalSwitchPort{Name: cniConf.Name}); err != nil {
+	//TODO: Retrieve the VMI mac address
+	vmiMAC := "1a:3c:0f:bf:92:50"
+
+	dhcpOptions := nbdb.DHCPOptions{
+		Cidr: cniConf.Subnet,
+		Options: map[string]string{
+			"lease_time": cniConf.LeaseTime,
+			"router":     cniConf.Router,
+			"server_id":  cniConf.Router,
+			"server_mac": "c0:ff:ee:00:00:01",
+		},
+	}
+
+	ops, err := cli.Create(&dhcpOptions)
+	if err != nil {
+		return fmt.Errorf("failed creating dhcp options: %v", err)
+	}
+	_, err = libovsdbops.TransactAndCheck(cli, ops)
+	if err != nil {
+		return fmt.Errorf("failed commiting dhcp options: %v", err)
+	}
+
+	dhcpOptionsResult := []nbdb.DHCPOptions{}
+	if err := cli.List(context.Background(), &dhcpOptionsResult); err != nil {
+		return fmt.Errorf("failed listing dhcp options: %v", err)
+	}
+	if len(dhcpOptionsResult) == 0 {
+		return fmt.Errorf("missing dhcp options")
+	}
+
+	ls := nbdb.LogicalSwitch{
+		Name: cniConf.Name,
+		OtherConfig: map[string]string{
+			"subnet":      cniConf.Subnet,
+			"exclude_ips": cniConf.ExcludeIps,
+		},
+	}
+
+	enabled := true
+	lsp := nbdb.LogicalSwitchPort{
+		Name:          portName,
+		Addresses:     []string{vmiMAC, "dynamic"},
+		Enabled:       &enabled,
+		Dhcpv4Options: &dhcpOptionsResult[0].UUID,
+	}
+	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(cli, &ls, &lsp); err != nil {
 		return err
 	}
 
@@ -121,6 +168,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 // cmdDel is called for DELETE requests
 func cmdDel(args *skel.CmdArgs) error {
+	logCall("DEL", args)
 	cniConf, err := parseConfig(args.StdinData)
 	if err != nil {
 		return err
@@ -131,9 +179,15 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
-	if err := libovsdbops.DeleteLogicalSwitchPorts(cli, &nbdb.LogicalSwitch{Name: cniConf.Name}, &nbdb.LogicalSwitchPort{Name: cniConf.Name}); err != nil {
+	portName, err := composePortNameFromExtraArgs(args.Args)
+	if err != nil {
 		return err
 	}
+
+	if err := libovsdbops.DeleteLogicalSwitchPorts(cli, &nbdb.LogicalSwitch{Name: cniConf.Name}, &nbdb.LogicalSwitchPort{Name: portName}); err != nil {
+		return err
+	}
+
 	if err := libovsdbops.DeleteLogicalSwitch(cli, cniConf.Name); err != nil {
 		return err
 	}
@@ -165,4 +219,40 @@ func newClient() (client.Client, error) {
 		return nil, err
 	}
 	return cli, nil
+}
+
+func composePortNameFromExtraArgs(args string) (string, error) {
+	extraArgs, err := parseArgs(args)
+	if err != nil {
+		return "", err
+	}
+	if extraArgs.K8S_POD_NAMESPACE == "" {
+		return "", fmt.Errorf("missing K8S_POD_NAMESPACE")
+	}
+	if extraArgs.K8S_POD_NAME == "" {
+		return "", fmt.Errorf("missing K8S_POD_NAME")
+	}
+
+	return composePortName(string(extraArgs.K8S_POD_NAMESPACE), string(extraArgs.K8S_POD_NAME)), nil
+}
+
+func composePortName(podNamespace, podName string) string {
+	return podNamespace + "_" + podName
+}
+
+func logCall(command string, args *skel.CmdArgs) {
+	log.Printf("CNI %s was called for container ID: %s, network namespace %s, interface name %s, configuration: %s, args: %s",
+		command, args.ContainerID, args.Netns, args.IfName, string(args.StdinData[:]), args.Args)
+}
+
+func parseArgs(envArgsString string) (*ExtraArgs, error) {
+	if envArgsString != "" {
+		e := ExtraArgs{}
+		err := cnitypes.LoadArgs(envArgsString, &e)
+		if err != nil {
+			return nil, err
+		}
+		return &e, nil
+	}
+	return nil, nil
 }

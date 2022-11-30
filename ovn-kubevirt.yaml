@@ -32,6 +32,11 @@ spec:
             name: host-lib-modules
       - name: ovn-controller
         image: quay.io/ellorent/ovn-kubevirt
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         args:
           - "/ovnkube.sh"
           - "ovn-controller"

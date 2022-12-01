@@ -156,7 +156,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	enabled := true
 	lsp := nbdb.LogicalSwitchPort{
 		Name:          portName,
-		Addresses:     []string{vmiMAC, "dynamic"},
+		Addresses:     []string{vmiMAC + " dynamic"},
 		Enabled:       &enabled,
 		Dhcpv4Options: &dhcpOptionsResult[0].UUID,
 	}

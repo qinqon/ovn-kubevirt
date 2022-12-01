@@ -1,18 +1,18 @@
+---
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
-  name: ovn-kubevirt
+  name: ovn-kubevirt-node
   labels:
-    app: ovn-kubevirt
+    app: ovn-kubevirt-node
 spec:
-  replicas: 1
   selector:
     matchLabels:
-      app: ovn-kubevirt
+      app: ovn-kubevirt-node
   template:
     metadata:
       labels:
-        app: ovn-kubevirt
+        app: ovn-kubevirt-node
     spec:
       hostNetwork: true
       containers:
@@ -25,9 +25,9 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: ovn-controller
@@ -44,13 +44,49 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
-          - mountPath: /var/run/ovn
-            name: host-var-run-ovn
+            name: var-log-openvswitch
           - mountPath: /lib/modules
             name: host-lib-modules
+      volumes:
+        - name: var-run-openvswitch
+          hostPath:
+            path: /var/run/openvswitch
+        - name: var-log-openvswitch
+          emptyDir: {}
+        - name: host-lib-modules
+          hostPath:
+            path: /lib/modules
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ovn-kubevirt-control-plane
+  labels:
+    app: ovn-kubevirt-control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ovn-kubevirt-control-plane
+  template:
+    metadata:
+      labels:
+        app: ovn-kubevirt-control-plane
+    spec:
+      tolerations:                                                              
+        - key: node-role.kubernetes.io/control-plane                            
+          operator: Exists                                                      
+          effect: NoSchedule                                                    
+        - key: node-role.kubernetes.io/master                                   
+          operator: Exists                                                      
+          effect: NoSchedule                                                    
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      hostNetwork: true
+      containers:
       - name: northd
         image: localhost:5001/ovn-kubevirt
         args:
@@ -60,15 +96,17 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: host-var-run-ovn
+            name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: nb-ovsdb
         image: localhost:5001/ovn-kubevirt
+        ports:
+        - containerPort: 6641
         env:
         - name: K8S_NODE_IP                                                     
           valueFrom:                                                            
@@ -81,11 +119,11 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: host-var-run-ovn
+            name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: sb-ovsdb
@@ -102,23 +140,37 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: host-var-run-ovn
+            name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       volumes:
-        - name: host-var-run-openvswitch
-          hostPath:
-            path: /var/run/openvswitch
-        - name: host-var-log-openvswitch
-          hostPath:
-            path: /var/log/openvswitch
-        - name: host-var-run-ovn
-          hostPath:
-            path: /var/run/ovn
+        - name: var-run-openvswitch
+          emptyDir: {}
+        - name: var-log-openvswitch
+          emptyDir: {}
+        - name: var-run-ovn
+          emptyDir: {}
         - name: host-lib-modules
           hostPath:
             path: /lib/modules
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ovn-kubevirt-control-plane
+  labels:
+    app: ovn-kubevirt-control-plane
+spec:
+  ports:
+  - name: nb-ovsdb
+    port: 6641
+    protocol: TCP
+  - name: sb-ovsdb
+    port: 6642
+    protocol: TCP
+  selector:
+    app: ovn-kubevirt-control-plane

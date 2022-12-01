@@ -1,3 +1,2 @@
 #!/bin/bash -e
-pod=$(kubectl get pod -l app=ovn-kubevirt --no-headers -o "name")
-kubectl exec $pod -c nb-ovsdb -- ovn-nbctl $@
+kubectl exec $(hack/control-plane) -c nb-ovsdb -- ovn-nbctl $@

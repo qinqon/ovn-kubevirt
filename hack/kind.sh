@@ -34,7 +34,8 @@ function install-calico() {
 
 function install-ovn-kubevirt() {
     kubectl apply -f $DIR/../ovn-kubevirt.yaml
-    kubectl rollout status deployment/ovn-kubevirt
+    kubectl rollout status deployment/ovn-kubevirt-control-plane
+    kubectl rollout status ds/ovn-kubevirt-node
 }
 
 function install-network-operators() {
@@ -70,6 +71,9 @@ function install-cni-plugin(){
     do
         docker cp ${OUTPUT_DIR}/${PLUGIN_NAME}  ${node}:${CNI_DIR}
         docker cp hack/ovs-vsctl  ${node}:/usr/local/bin
+        cp .out/kubeconfig .out/kubeconfig-internal
+        kubectl config --kubeconfig=.out/kubeconfig-internal set-cluster kind-ovn-kubevirt --server=https://$(kubectl get svc kubernetes -o json |jq -r .spec.clusterIP)
+        docker cp .out/kubeconfig-internal ${node}:/etc/cni/net.d/ovn-kubevirt-kubeconfig
     done
 }
 
@@ -97,6 +101,7 @@ networking:
 nodes:
 - role: control-plane
 - role: worker
+- role: worker
 containerdConfigPatches:
 - |-
   [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:${reg_port}"]
@@ -121,7 +126,14 @@ data:
     host: "localhost:${reg_port}"
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
 EOF
-
+    for node in $(kubectl get node --no-headers  -o custom-columns=":metadata.name"); do   
+        docker exec -t $node bash -c "echo 'fs.inotify.max_user_watches=1048576' >> /etc/sysctl.conf"
+        docker exec -t $node bash -c "echo 'fs.inotify.max_user_instances=512' >> /etc/sysctl.conf"
+        docker exec -i $node bash -c "sysctl -p /etc/sysctl.conf"                      
+        if [[ "${node}" =~ worker ]]; then
+            kubectl label nodes $node node-role.kubernetes.io/worker="" --overwrite=true
+        fi
+    done             
     install-calico
     install-ovn-kubevirt
     install-network-operators

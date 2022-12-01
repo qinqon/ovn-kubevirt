@@ -1026,7 +1026,7 @@ ovn-controller() {
   tail --follow=name ${OVN_LOGDIR}/ovn-controller.log &
   controller_tail_pid=$!
   
-  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-remote=\"unix:/var/run/ovn/ovnsb_db.sock\"
+  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-remote=\"tcp:ovn-kubevirt-control-plane:6642\"
   ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-encap-ip=${POD_IP}
   ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-encap-type=geneve
 

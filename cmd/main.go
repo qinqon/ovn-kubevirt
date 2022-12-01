@@ -21,15 +21,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/ovn-org/libovsdb/client"
+	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	ovsclient "github.com/ovn-org/libovsdb/client"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
@@ -46,7 +51,7 @@ type PluginConf struct {
 }
 
 type ExtraArgs struct {
-	K8S_POD_NAMESPACE, K8S_POD_NAME cnitypes.UnmarshallableString
+	MAC, K8S_POD_NAMESPACE, K8S_POD_NAME cnitypes.UnmarshallableString
 	cnitypes.CommonArgs
 }
 
@@ -94,18 +99,27 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return fmt.Errorf("failed to convert prevResult: %v", err)
 	}
-
-	portName, err := composePortNameFromExtraArgs(args.Args)
+	extraArgs, err := parseArgs(args.Args)
 	if err != nil {
 		return err
 	}
-	setIfaceIDCmd := exec.Command("ovs-vsctl", "add", "Interface", prevResult.Interfaces[0].Name, "external_ids", fmt.Sprintf("iface-id=%s", portName))
-	setIfaceIDCmd.Env = []string{"KUBECONFIG=/etc/kubernetes/admin.conf"}
-	if output, err := setIfaceIDCmd.CombinedOutput(); err != nil {
+
+	// The vmi MAC is set by kubevirt on the multus annotation
+	if extraArgs.MAC == "" {
+		return fmt.Errorf("missing macAddress at VMI")
+	}
+
+	portName, err := composePortNameFromExtraArgs(extraArgs)
+	if err != nil {
+		return err
+	}
+
+	output, err := runOVSVsctl("add", "Interface", prevResult.Interfaces[0].Name, "external_ids", fmt.Sprintf("iface-id=%s", portName))
+	if err != nil {
 		return fmt.Errorf("%s: %v", output, err)
 	}
 
-	cli, err := newClient()
+	cli, err := newNBOVNClient()
 	if err != nil {
 		return err
 	}
@@ -114,9 +128,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-
-	//TODO: Retrieve the VMI mac address
-	vmiMAC := "1a:3c:0f:bf:92:50"
 
 	dhcpOptions := nbdb.DHCPOptions{
 		Cidr: cniConf.Subnet,
@@ -156,7 +167,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	enabled := true
 	lsp := nbdb.LogicalSwitchPort{
 		Name:          portName,
-		Addresses:     []string{vmiMAC + " dynamic"},
+		Addresses:     []string{string(extraArgs.MAC) + " dynamic"},
 		Enabled:       &enabled,
 		Dhcpv4Options: &dhcpOptionsResult[0].UUID,
 	}
@@ -175,12 +186,17 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
-	cli, err := newClient()
+	cli, err := newNBOVNClient()
 	if err != nil {
 		return err
 	}
 
-	portName, err := composePortNameFromExtraArgs(args.Args)
+	extraArgs, err := parseArgs(args.Args)
+	if err != nil {
+		return err
+	}
+
+	portName, err := composePortNameFromExtraArgs(extraArgs)
 	if err != nil {
 		return err
 	}
@@ -189,9 +205,12 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
-	if err := libovsdbops.DeleteLogicalSwitch(cli, cniConf.Name); err != nil {
-		return err
-	}
+	//FIXME: Switch has to be delete on "tenant" removal
+	/*
+		if err := libovsdbops.DeleteLogicalSwitch(cli, cniConf.Name); err != nil {
+			return err
+		}
+	*/
 	return nil
 }
 
@@ -204,13 +223,13 @@ func main() {
 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("OVN kubevirt"))
 }
 
-func newClient() (client.Client, error) {
+func newNBOVNClient() (ovsclient.Client, error) {
 	ovsNbModel, err := nbdb.FullDatabaseModel()
 	if err != nil {
 		return nil, err
 	}
 
-	cli, err := client.NewOVSDBClient(ovsNbModel, client.WithEndpoint("tcp:172.18.0.2:6641"))
+	cli, err := ovsclient.NewOVSDBClient(ovsNbModel, ovsclient.WithEndpoint("tcp:ovn-kubevirt-control-plane:6641"))
 
 	err = cli.Connect(context.Background())
 	if err != nil {
@@ -222,11 +241,20 @@ func newClient() (client.Client, error) {
 	return cli, nil
 }
 
-func composePortNameFromExtraArgs(args string) (string, error) {
-	extraArgs, err := parseArgs(args)
+func newK8SClient() (k8sclient.Client, error) {
+	kubeConfig, err := os.ReadFile("/etc/cni/net.d/ovn-kubevirt-kubeconfig")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	restCfg, err := clientcmd.RESTConfigFromKubeConfig(kubeConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return k8sclient.New(restCfg, k8sclient.Options{})
+}
+
+func composePortNameFromExtraArgs(extraArgs *ExtraArgs) (string, error) {
 	if extraArgs.K8S_POD_NAMESPACE == "" {
 		return "", fmt.Errorf("missing K8S_POD_NAMESPACE")
 	}
@@ -256,4 +284,23 @@ func parseArgs(envArgsString string) (*ExtraArgs, error) {
 		return &e, nil
 	}
 	return nil, nil
+}
+
+func runOVSVsctl(args ...string) ([]byte, error) {
+	kubeconfigEnv := []string{"KUBECONFIG=/etc/cni/net.d/ovn-kubevirt-kubeconfig"}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	//TODO: Use k8s clientset
+	cmd := exec.Command("kubectl", "get", "pod", "-l", "app=ovn-kubevirt-node", "--no-headers", "-o", "name", "--field-selector", fmt.Sprintf("spec.nodeName=%s", hostname))
+	cmd.Env = kubeconfigEnv
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return output, err
+	}
+	podName := strings.TrimSuffix(string(output), "\n")
+	cmd = exec.Command("kubectl", append([]string{"exec", podName, "-c", "ovs-server", "--", "ovs-vsctl"}, args...)...)
+	cmd.Env = kubeconfigEnv
+	return cmd.CombinedOutput()
 }

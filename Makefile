@@ -7,11 +7,12 @@ push: build
 	docker push ${REGISTRY}/ovn-kubevirt
 run: 
 	hack/kind.sh run
+
 apply: push
-	kubectl apply -f ovn-kubevirt.yaml
+	hack/kind.sh install-ovn-kubevirt
 
 delete: 
-	kubectl delete -f ovn-kubevirt.yaml
+	kubectl delete -f ovn-kubevirt.yaml --ignore-not-found
 
 install: plugin
 	hack/kind.sh install-cni-plugin
@@ -24,5 +25,6 @@ plugin:
 	hack/kind.sh build-cni-plugin
 
 sync: delete apply
+
 logs:
 	kubectl logs -l app=ovn-kubevirt --all-containers --tail=100000

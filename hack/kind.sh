@@ -69,7 +69,7 @@ function install-cni-plugin(){
     for node in $(kubectl get node --no-headers  -o custom-columns=":metadata.name")   
     do
         docker cp ${OUTPUT_DIR}/${PLUGIN_NAME}  ${node}:${CNI_DIR}
-        docker cp hack/ovs-vsctl.sh  ${node}:/usr/local/bin/ovs-vsctl
+        docker cp hack/ovs-vsctl  ${node}:/usr/local/bin
     done
 }
 

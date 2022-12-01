@@ -25,9 +25,9 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: var-run-openvswitch
+            name: host-var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: var-log-openvswitch
+            name: host-var-log-openvswitch
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: ovn-controller
@@ -44,11 +44,11 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: var-run-openvswitch
+            name: host-var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: var-log-openvswitch
+            name: host-var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: var-run-ovn
+            name: host-var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: northd
@@ -60,11 +60,11 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: var-run-openvswitch
+            name: host-var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: var-log-openvswitch
+            name: host-var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: var-run-ovn
+            name: host-var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: nb-ovsdb
@@ -81,11 +81,11 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: var-run-openvswitch
+            name: host-var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: var-log-openvswitch
+            name: host-var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: var-run-ovn
+            name: host-var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: sb-ovsdb
@@ -102,20 +102,23 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: var-run-openvswitch
+            name: host-var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: var-log-openvswitch
+            name: host-var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: var-run-ovn
+            name: host-var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       volumes:
-        - name: var-run-openvswitch
-          emptyDir: {}
-        - name: var-log-openvswitch
-          emptyDir: {}
-        - name: var-run-ovn
-          emptyDir: {}
+        - name: host-var-run-openvswitch
+          hostPath:
+            path: /var/run/openvswitch
+        - name: host-var-log-openvswitch
+          hostPath:
+            path: /var/log/openvswitch
+        - name: host-var-run-ovn
+          hostPath:
+            path: /var/run/ovn
         - name: host-lib-modules
           hostPath:
             path: /lib/modules

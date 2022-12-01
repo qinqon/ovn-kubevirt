@@ -99,8 +99,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-
-	if output, err := exec.Command("ovs-vsctl", "add", "Interface", prevResult.Interfaces[0].Name, "external_ids", fmt.Sprintf("iface-id=%s", portName)).CombinedOutput(); err != nil {
+	setIfaceIDCmd := exec.Command("ovs-vsctl", "add", "Interface", prevResult.Interfaces[0].Name, "external_ids", fmt.Sprintf("iface-id=%s", portName))
+	setIfaceIDCmd.Env = []string{"KUBECONFIG=/etc/kubernetes/admin.conf"}
+	if output, err := setIfaceIDCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %v", output, err)
 	}
 

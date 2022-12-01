@@ -17,7 +17,7 @@ spec:
       hostNetwork: true
       containers:
       - name: ovs-server
-        image: quay.io/ellorent/ovn-kubevirt
+        image: localhost:5001/ovn-kubevirt
         args:
           - "/ovnkube.sh"
           - "ovs-server"
@@ -25,13 +25,13 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: ovn-controller
-        image: quay.io/ellorent/ovn-kubevirt
+        image: localhost:5001/ovn-kubevirt
         env:
         - name: POD_IP
           valueFrom:
@@ -44,15 +44,15 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: host-var-run-ovn
+            name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: northd
-        image: quay.io/ellorent/ovn-kubevirt
+        image: localhost:5001/ovn-kubevirt
         args:
           - "/ovnkube.sh"
           - "run-ovn-northd"
@@ -60,15 +60,15 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: host-var-run-ovn
+            name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: nb-ovsdb
-        image: quay.io/ellorent/ovn-kubevirt
+        image: localhost:5001/ovn-kubevirt
         env:
         - name: K8S_NODE_IP                                                     
           valueFrom:                                                            
@@ -81,15 +81,15 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: host-var-run-ovn
+            name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       - name: sb-ovsdb
-        image: quay.io/ellorent/ovn-kubevirt
+        image: localhost:5001/ovn-kubevirt
         env:
         - name: K8S_NODE_IP                                                     
           valueFrom:                                                            
@@ -102,23 +102,20 @@ spec:
           privileged: true
         volumeMounts:
           - mountPath: /var/run/openvswitch
-            name: host-var-run-openvswitch
+            name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
-            name: host-var-log-openvswitch
+            name: var-log-openvswitch
           - mountPath: /var/run/ovn
-            name: host-var-run-ovn
+            name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
       volumes:
-        - name: host-var-run-openvswitch
-          hostPath:
-            path: /var/run/openvswitch
-        - name: host-var-log-openvswitch
-          hostPath:
-            path: /var/log/openvswitch
-        - name: host-var-run-ovn
-          hostPath:
-            path: /var/run/ovn
+        - name: var-run-openvswitch
+          emptyDir: {}
+        - name: var-log-openvswitch
+          emptyDir: {}
+        - name: var-run-ovn
+          emptyDir: {}
         - name: host-lib-modules
           hostPath:
             path: /lib/modules

@@ -1,12 +1,13 @@
+REGISTRY ?= localhost:5001
 export KUBECONFIG := .out/kubeconfig
 
 build:
-	docker build . -t quay.io/ellorent/ovn-kubevirt
+	docker build . -t ${REGISTRY}/ovn-kubevirt
 push: build
-	docker push quay.io/ellorent/ovn-kubevirt
+	docker push ${REGISTRY}/ovn-kubevirt
 run: 
 	hack/kind.sh run
-apply:
+apply: push
 	kubectl apply -f ovn-kubevirt.yaml
 
 delete: 

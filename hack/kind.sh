@@ -96,6 +96,7 @@ networking:
   disableDefaultCNI: true
 nodes:
 - role: control-plane
+- role: worker
 containerdConfigPatches:
 - |-
   [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:${reg_port}"]

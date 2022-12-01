@@ -60,6 +60,11 @@ spec:
       image: quay.io/kubevirtci/alpine-with-test-tooling-container-disk:2211290730-4eb880c
     name: containerdisk
   - cloudInitNoCloud:
+      networkData: |
+        version: 2
+        ethernets:
+          eth1:
+            dhcp4: true
       userData: |-
         #cloud-config
         password: fedora

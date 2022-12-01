@@ -1,0 +1,2 @@
+#!/bin/bash -e 
+kubectl get pod -l app=ovn-kubevirt --no-headers -o "name"

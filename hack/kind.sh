@@ -24,6 +24,9 @@ function install-kubevirt() {
     kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KV_VER}/kubevirt-operator.yaml"
 
     kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KV_VER}/kubevirt-cr.yaml"
+}
+
+function wait-kubevirt() {
     kubectl wait -n kubevirt kv kubevirt --for=condition=Available --timeout=10m
 }
 
@@ -34,6 +37,8 @@ function install-calico() {
 
 function install-ovn-kubevirt() {
     kubectl apply -f $DIR/../ovn-kubevirt.yaml
+}
+function wait-ovn-kubevirt() {
     kubectl rollout status deployment/ovn-kubevirt-control-plane
     kubectl rollout status ds/ovn-kubevirt-node
 }
@@ -54,6 +59,9 @@ spec:
   multus: {}
   ovs: {}
 EOF
+}
+
+function wait-network-operators() {
     kubectl wait networkaddonsconfig cluster --for condition=Available --timeout=2m
 }
 
@@ -138,6 +146,9 @@ EOF
     install-ovn-kubevirt
     install-network-operators
     install-kubevirt
+    wait-ovn-kubevirt
+    wait-network-operators
+    wait-kubevirt
 }
 
 $1

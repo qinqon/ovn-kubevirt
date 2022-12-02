@@ -30,7 +30,12 @@ import (
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
+
+	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -41,6 +46,19 @@ import (
 
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
+
+var (
+	pluginscheme = runtime.NewScheme()
+)
+
+func init() {
+	if err := scheme.AddToScheme(pluginscheme); err != nil {
+		panic(err)
+	}
+	if err := kubevirtv1.AddToScheme(pluginscheme); err != nil {
+		panic(err)
+	}
+}
 
 type PluginConf struct {
 	types.NetConf
@@ -53,6 +71,15 @@ type PluginConf struct {
 type ExtraArgs struct {
 	MAC, K8S_POD_NAMESPACE, K8S_POD_NAME cnitypes.UnmarshallableString
 	cnitypes.CommonArgs
+}
+
+type CmdContext struct {
+	k8scli       k8sclient.Client
+	ovscli       ovsclient.Client
+	conf         *PluginConf
+	mac          string
+	vmi          *kubevirtv1.VirtualMachineInstance
+	virtLauncher *corev1.Pod
 }
 
 // parseConfig parses the supplied configuration (and prevResult) from stdin.
@@ -77,79 +104,47 @@ func parseConfig(stdin []byte) (*PluginConf, error) {
 // cmdAdd is called for ADD requests
 func cmdAdd(args *skel.CmdArgs) error {
 	logCall("ADD", args)
-	cniConf, err := parseConfig(args.StdinData)
+	ctx, err := loadCmdContext(args)
 	if err != nil {
 		return err
 	}
 
-	// A plugin can be either an "originating" plugin or a "chained" plugin.
-	// Originating plugins perform initial sandbox setup and do not require
-	// any result from a previous plugin in the chain. A chained plugin
-	// modifies sandbox configuration that was previously set up by an
-	// originating plugin and may optionally require a PrevResult from
-	// earlier plugins in the chain.
-
-	// START chained plugin code
-	if cniConf.PrevResult == nil {
+	if ctx.conf.PrevResult == nil {
 		return fmt.Errorf("must be called chained with ovs plugin")
 	}
 
-	// Convert the PrevResult to a concrete Result type that can be modified.
-	prevResult, err := current.GetResult(cniConf.PrevResult)
+	prevResult, err := current.GetResult(ctx.conf.PrevResult)
 	if err != nil {
 		return fmt.Errorf("failed to convert prevResult: %v", err)
 	}
-	extraArgs, err := parseArgs(args.Args)
-	if err != nil {
-		return err
-	}
 
-	// The vmi MAC is set by kubevirt on the multus annotation
-	if extraArgs.MAC == "" {
-		return fmt.Errorf("missing macAddress at VMI")
-	}
-
-	portName, err := composePortNameFromExtraArgs(extraArgs)
-	if err != nil {
-		return err
-	}
-
+	portName := composePortName(ctx.vmi.Namespace, ctx.vmi.Name)
 	output, err := runOVSVsctl("add", "Interface", prevResult.Interfaces[0].Name, "external_ids", fmt.Sprintf("iface-id=%s", portName))
 	if err != nil {
 		return fmt.Errorf("%s: %v", output, err)
 	}
 
-	cli, err := newNBOVNClient()
-	if err != nil {
-		return err
-	}
-
-	err = cli.Connect(context.Background())
-	if err != nil {
-		return err
-	}
-
 	dhcpOptions := nbdb.DHCPOptions{
-		Cidr: cniConf.Subnet,
+		Cidr: ctx.conf.Subnet,
 		Options: map[string]string{
-			"lease_time": cniConf.LeaseTime,
-			"router":     cniConf.Router,
-			"server_id":  cniConf.Router,
+			"lease_time": ctx.conf.LeaseTime,
+			"router":     ctx.conf.Router,
+			"server_id":  ctx.conf.Router,
 			"server_mac": "c0:ff:ee:00:00:01",
 		},
 	}
 
-	ops, err := cli.Create(&dhcpOptions)
+	ops, err := ctx.ovscli.Create(&dhcpOptions)
 	if err != nil {
 		return fmt.Errorf("failed creating dhcp options: %v", err)
 	}
-	_, err = libovsdbops.TransactAndCheck(cli, ops)
+	_, err = libovsdbops.TransactAndCheck(ctx.ovscli, ops)
 	if err != nil {
 		return fmt.Errorf("failed commiting dhcp options: %v", err)
 	}
 
 	dhcpOptionsResult := []nbdb.DHCPOptions{}
-	if err := cli.List(context.Background(), &dhcpOptionsResult); err != nil {
+	if err := ctx.ovscli.List(context.Background(), &dhcpOptionsResult); err != nil {
 		return fmt.Errorf("failed listing dhcp options: %v", err)
 	}
 	if len(dhcpOptionsResult) == 0 {
@@ -157,57 +152,56 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	ls := nbdb.LogicalSwitch{
-		Name: cniConf.Name,
+		Name: ctx.conf.Name,
 		OtherConfig: map[string]string{
-			"subnet":      cniConf.Subnet,
-			"exclude_ips": cniConf.ExcludeIps,
+			"subnet":      ctx.conf.Subnet,
+			"exclude_ips": ctx.conf.ExcludeIps,
 		},
+	}
+
+	address := "dynamic"
+	// virt-launcher pod has the mac on the annotation
+	if ctx.mac != "" {
+		address = ctx.mac + " " + address
 	}
 
 	enabled := true
 	lsp := nbdb.LogicalSwitchPort{
 		Name:          portName,
-		Addresses:     []string{string(extraArgs.MAC) + " dynamic"},
+		Addresses:     []string{address},
 		Enabled:       &enabled,
 		Dhcpv4Options: &dhcpOptionsResult[0].UUID,
 	}
-	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(cli, &ls, &lsp); err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.ovscli, &ls, &lsp); err != nil {
 		return err
 	}
 
-	return types.PrintResult(&current.Result{}, cniConf.CNIVersion)
+	return types.PrintResult(&current.Result{}, ctx.conf.CNIVersion)
 }
 
 // cmdDel is called for DELETE requests
 func cmdDel(args *skel.CmdArgs) error {
 	logCall("DEL", args)
-	cniConf, err := parseConfig(args.StdinData)
+	ctx, err := loadCmdContext(args)
 	if err != nil {
 		return err
 	}
 
-	cli, err := newNBOVNClient()
-	if err != nil {
-		return err
+	// If this is the origin virt-launcher pod of a live migrated vmi
+	// don't remove the logical switch, it's being use by the target
+	// virt-launcher pod
+	if ctx.vmi.Status.MigrationState.TargetPod != ctx.virtLauncher.Name {
+		return nil
 	}
 
-	extraArgs, err := parseArgs(args.Args)
-	if err != nil {
-		return err
-	}
-
-	portName, err := composePortNameFromExtraArgs(extraArgs)
-	if err != nil {
-		return err
-	}
-
-	if err := libovsdbops.DeleteLogicalSwitchPorts(cli, &nbdb.LogicalSwitch{Name: cniConf.Name}, &nbdb.LogicalSwitchPort{Name: portName}); err != nil {
+	portName := composePortName(ctx.vmi.Namespace, ctx.vmi.Name)
+	if err := libovsdbops.DeleteLogicalSwitchPorts(ctx.ovscli, &nbdb.LogicalSwitch{Name: ctx.conf.Name}, &nbdb.LogicalSwitchPort{Name: portName}); err != nil {
 		return err
 	}
 
 	//FIXME: Switch has to be delete on "tenant" removal
 	/*
-		if err := libovsdbops.DeleteLogicalSwitch(cli, cniConf.Name); err != nil {
+		if err := libovsdbops.DeleteLogicalSwitch(cli, ctx.conf.Name); err != nil {
 			return err
 		}
 	*/
@@ -251,18 +245,7 @@ func newK8SClient() (k8sclient.Client, error) {
 		return nil, err
 	}
 
-	return k8sclient.New(restCfg, k8sclient.Options{})
-}
-
-func composePortNameFromExtraArgs(extraArgs *ExtraArgs) (string, error) {
-	if extraArgs.K8S_POD_NAMESPACE == "" {
-		return "", fmt.Errorf("missing K8S_POD_NAMESPACE")
-	}
-	if extraArgs.K8S_POD_NAME == "" {
-		return "", fmt.Errorf("missing K8S_POD_NAME")
-	}
-
-	return composePortName(string(extraArgs.K8S_POD_NAMESPACE), string(extraArgs.K8S_POD_NAME)), nil
+	return k8sclient.New(restCfg, k8sclient.Options{Scheme: pluginscheme})
 }
 
 func composePortName(podNamespace, podName string) string {
@@ -303,4 +286,56 @@ func runOVSVsctl(args ...string) ([]byte, error) {
 	cmd = exec.Command("kubectl", append([]string{"exec", podName, "-c", "ovs-server", "--", "ovs-vsctl"}, args...)...)
 	cmd.Env = kubeconfigEnv
 	return cmd.CombinedOutput()
+}
+
+func loadCmdContext(args *skel.CmdArgs) (*CmdContext, error) {
+	ctx := CmdContext{}
+
+	var err error
+	ctx.k8scli, err = newK8SClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx.ovscli, err = newNBOVNClient()
+	if err != nil {
+		return nil, err
+	}
+
+	ctx.conf, err = parseConfig(args.StdinData)
+	if err != nil {
+		return nil, err
+	}
+
+	extraArgs, err := parseArgs(args.Args)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx.mac = string(extraArgs.MAC)
+	if extraArgs.K8S_POD_NAMESPACE == "" {
+		return nil, fmt.Errorf("missing K8S_POD_NAMESPACE")
+	}
+
+	if extraArgs.K8S_POD_NAME == "" {
+		return nil, fmt.Errorf("missing K8S_POD_NAME")
+	}
+
+	ctx.virtLauncher = &corev1.Pod{}
+	if err := ctx.k8scli.Get(context.Background(), k8sclient.ObjectKey{Namespace: string(extraArgs.K8S_POD_NAMESPACE), Name: string(extraArgs.K8S_POD_NAME)}, ctx.virtLauncher); err != nil {
+		return nil, err
+	}
+
+	if ctx.virtLauncher.Labels == nil {
+		return nil, fmt.Errorf("missing virt-launcher labels")
+	}
+	vmName, ok := ctx.virtLauncher.Labels["vm.kubevirt.io/name"]
+	if !ok {
+		return nil, fmt.Errorf("missing virt-launcher label vm.kubevirt.io/name")
+	}
+
+	ctx.vmi = &kubevirtv1.VirtualMachineInstance{}
+	if err := ctx.k8scli.Get(context.Background(), k8sclient.ObjectKey{Namespace: ctx.virtLauncher.Namespace, Name: vmName}, ctx.vmi); err != nil {
+		return nil, err
+	}
+	return &ctx, nil
 }

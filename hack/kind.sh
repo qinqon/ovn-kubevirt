@@ -65,6 +65,25 @@ function wait-network-operators() {
     kubectl wait networkaddonsconfig cluster --for condition=Available --timeout=2m
 }
 
+function install-kubernetes-nmstate() {
+    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/nmstate.io_nmstates.yaml
+    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/namespace.yaml
+    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/service_account.yaml
+    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/role.yaml
+    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/role_binding.yaml
+    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/operator.yaml
+    cat <<EOF | kubectl create -f -
+apiVersion: nmstate.io/v1
+kind: NMState
+metadata:
+  name: nmstate
+EOF
+}
+
+function wait-kubernetes-nmstate() {
+    kubectl rollout status -w -n nmstate ds nmstate-handler --timeout=2m
+    kubectl rollout status -w -n nmstate deployment nmstate-webhook --timeout=2m
+}
 
 function build-cni-plugin() {
     (
@@ -82,6 +101,16 @@ function install-cni-plugin(){
         cp .out/kubeconfig .out/kubeconfig-internal
         kubectl config --kubeconfig=.out/kubeconfig-internal set-cluster kind-ovn-kubevirt --server=https://$(kubectl get svc kubernetes -o json |jq -r .spec.clusterIP)
         docker cp .out/kubeconfig-internal ${node}:/etc/cni/net.d/ovn-kubevirt-kubeconfig
+    done
+}
+
+function setup-br-ex() {
+    for pod in $(kubectl get pod -l app=ovn-kubevirt-node --no-headers  -o custom-columns=":metadata.name")   
+    do
+        kubectl exec $pod -c ovs-server -- ovs-vsctl --may-exist add-br br-ex
+        # FIXME: This breaks kind
+        #kubectl exec $pod -c ovs-server -- ovs-vsctl --may-exist add-port br-ex eth0
+        kubectl exec $pod -c ovs-server -- ovs-vsctl set open . external-ids:ovn-bridge-mappings=external:br-ex
     done
 }
 
@@ -146,9 +175,12 @@ EOF
     install-ovn-kubevirt
     install-network-operators
     install-kubevirt
+    #install-kubernetes-nmstate
     wait-ovn-kubevirt
     wait-network-operators
     wait-kubevirt
+    #wait-kubernetes-nmstate
+    setup-br-ex
 }
 
 $1

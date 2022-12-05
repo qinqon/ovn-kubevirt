@@ -30,6 +30,7 @@ import (
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+	"github.com/ovn-org/libovsdb/ovsdb"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -134,21 +135,33 @@ func cmdAdd(args *skel.CmdArgs) error {
 		},
 	}
 
-	ops, err := ctx.ovscli.Create(&dhcpOptions)
-	if err != nil {
-		return fmt.Errorf("failed creating dhcp options: %v", err)
-	}
-	_, err = libovsdbops.TransactAndCheck(ctx.ovscli, ops)
-	if err != nil {
-		return fmt.Errorf("failed commiting dhcp options: %v", err)
+	if err := createOrUpdateDHCPOptions(ctx, &dhcpOptions); err != nil {
+		return err
 	}
 
-	dhcpOptionsResult := []nbdb.DHCPOptions{}
-	if err := ctx.ovscli.List(context.Background(), &dhcpOptionsResult); err != nil {
-		return fmt.Errorf("failed listing dhcp options: %v", err)
+	lr := nbdb.LogicalRouter{
+		Name: "public",
 	}
-	if len(dhcpOptionsResult) == 0 {
-		return fmt.Errorf("missing dhcp options")
+
+	if err := libovsdbops.CreateOrUpdateLogicalRouter(ctx.ovscli, &lr); err != nil {
+		return err
+	}
+
+	lrps := []*nbdb.LogicalRouterPort{
+		&nbdb.LogicalRouterPort{
+			Name:     ctx.conf.Name,
+			MAC:      "00:00:00:00:ff:01",
+			Networks: []string{ctx.conf.Router + "/24"}, // FIXME: Use bits from conf.Subnet
+		},
+		&nbdb.LogicalRouterPort{
+			Name:     "public",
+			MAC:      "00:00:20:20:12:13",
+			Networks: []string{"172.168.0.200/24"},
+		},
+	}
+
+	if err := libovsdbops.CreateOrUpdateLogicalRouterPorts(ctx.ovscli, &lr, lrps); err != nil {
+		return err
 	}
 
 	ls := nbdb.LogicalSwitch{
@@ -166,16 +179,59 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	enabled := true
-	lsp := nbdb.LogicalSwitchPort{
-		Name:          portName,
-		Addresses:     []string{address},
-		Enabled:       &enabled,
-		Dhcpv4Options: &dhcpOptionsResult[0].UUID,
+	lsps := []*nbdb.LogicalSwitchPort{
+		&nbdb.LogicalSwitchPort{
+			Name:          portName,
+			Addresses:     []string{address},
+			Enabled:       &enabled,
+			Dhcpv4Options: &dhcpOptions.UUID,
+		},
+		&nbdb.LogicalSwitchPort{
+			Name:      ctx.conf.Name,
+			Type:      "router",
+			Addresses: []string{"router"},
+			Options: map[string]string{
+				"router-port": ctx.conf.Name,
+			},
+		},
 	}
-	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.ovscli, &ls, &lsp); err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.ovscli, &ls, lsps...); err != nil {
 		return err
 	}
 
+	lsPublic := nbdb.LogicalSwitch{
+		Name: "public",
+	}
+	lspsPublic := []*nbdb.LogicalSwitchPort{
+		&nbdb.LogicalSwitchPort{
+			Name:      "ln-public",
+			Type:      "localnet",
+			Addresses: []string{"unknown"},
+			Options: map[string]string{
+				"network_name": "external",
+			},
+		},
+		&nbdb.LogicalSwitchPort{
+			Name:      "lr-public",
+			Type:      "router",
+			Addresses: []string{"router"},
+			Options: map[string]string{
+				"router_port": "public",
+			},
+		},
+	}
+	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.ovscli, &lsPublic, lspsPublic...); err != nil {
+		return err
+	}
+
+	gatewayChassis := &nbdb.GatewayChassis{
+		Name:        "worker",
+		ChassisName: "worker",
+		Priority:    20,
+	}
+	if err := libovsdbops.CreateOrUpdateGatewayChassis(ctx.ovscli, lrps[1], gatewayChassis); err != nil {
+		return err
+	}
 	return types.PrintResult(&current.Result{}, ctx.conf.CNIVersion)
 }
 
@@ -190,7 +246,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	// If this is the origin virt-launcher pod of a live migrated vmi
 	// don't remove the logical switch, it's being use by the target
 	// virt-launcher pod
-	if ctx.vmi.Status.MigrationState.TargetPod != ctx.virtLauncher.Name {
+	if ctx.vmi.Status.MigrationState != nil && ctx.vmi.Status.MigrationState.TargetPod != ctx.virtLauncher.Name {
 		return nil
 	}
 
@@ -338,4 +394,45 @@ func loadCmdContext(args *skel.CmdArgs) (*CmdContext, error) {
 		return nil, err
 	}
 	return &ctx, nil
+}
+
+func createOrUpdateDHCPOptions(ctx *CmdContext, dhcpOptions *nbdb.DHCPOptions) error {
+	dhcpOptionsResult := []nbdb.DHCPOptions{}
+	if err := ctx.ovscli.List(context.Background(), &dhcpOptionsResult); err != nil {
+		return fmt.Errorf("failed listing dhcp options: %v", err)
+	}
+	ops := []ovsdb.Operation{}
+	if len(dhcpOptionsResult) == 0 {
+		var err error
+		ops, err = ctx.ovscli.Create(dhcpOptions)
+		if err != nil {
+			return fmt.Errorf("failed creating dhcp options: %v", err)
+		}
+	} else {
+		for _, d := range dhcpOptionsResult {
+			if d.Cidr == ctx.conf.Subnet {
+				var err error
+				ops, err = ctx.ovscli.Where(&d).Update(dhcpOptions)
+				if err != nil {
+					return fmt.Errorf("failed updating dhcp options: %v", err)
+				}
+				break
+			}
+		}
+	}
+
+	_, err := libovsdbops.TransactAndCheck(ctx.ovscli, ops)
+	if err != nil {
+		return fmt.Errorf("failed commiting dhcp options: %v", err)
+	}
+
+	dhcpOptionsResult = []nbdb.DHCPOptions{}
+	if err := ctx.ovscli.List(context.Background(), &dhcpOptionsResult); err != nil {
+		return fmt.Errorf("failed listing dhcp options: %v", err)
+	}
+	if len(dhcpOptionsResult) == 0 {
+		return fmt.Errorf("missing dhcp options")
+	}
+	*dhcpOptions = dhcpOptionsResult[0]
+	return nil
 }

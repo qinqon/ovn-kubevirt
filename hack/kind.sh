@@ -108,6 +108,7 @@ function setup-br-ex() {
     for pod in $(kubectl get pod -l app=ovn-kubevirt-node --no-headers  -o custom-columns=":metadata.name")   
     do
         kubectl exec $pod -c ovs-server -- ovs-vsctl --may-exist add-br br-ex
+        kubectl exec $pod -c ovs-server -- ovs-vsctl --may-exist add-port br-ex br-ex -- set Interface br-ex type=internal
         # FIXME: This breaks kind
         #kubectl exec $pod -c ovs-server -- ovs-vsctl --may-exist add-port br-ex eth0
         kubectl exec $pod -c ovs-server -- ovs-vsctl set open . external-ids:ovn-bridge-mappings=external:br-ex

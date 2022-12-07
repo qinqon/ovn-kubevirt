@@ -41,7 +41,11 @@ spec:
           - "/ovnkube.sh"
           - "ovn-controller"
         securityContext:
+          runAsUser: 0
           privileged: true
+          capabilities:
+            add:
+            - NET_ADMIN
         volumeMounts:
           - mountPath: /var/run/openvswitch
             name: var-run-openvswitch
@@ -58,7 +62,13 @@ spec:
         - name: host-lib-modules
           hostPath:
             path: /lib/modules
-
+        - name: dbus-socket
+          hostPath:
+            path: /run/dbus/system_bus_socket
+            type: Socket
+        - name: sys-fs-cgroup
+          hostPath:
+            path:  /sys/fs/cgroup
 ---
 apiVersion: apps/v1
 kind: Deployment

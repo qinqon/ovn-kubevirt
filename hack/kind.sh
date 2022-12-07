@@ -10,8 +10,7 @@ OUTPUT_DIR=${ROOT_DIR}/.out
 CNI_DIR=/opt/cni/bin
 PLUGIN_NAME=ovn-kubevirt
 KIND_CLUSTER_NAME=ovn-kubevirt
-KIND_IMAGE=${KIND_IMAGE:-kindest/node}
-K8S_VERSION=${K8S_VERSION:-v1.24.0}
+KIND_IMAGE=${KIND_IMAGE:-kindest/node:v1.24.7@sha256:577c630ce8e509131eab1aea12c022190978dd2f745aac5eb1fe65c0807eb315}
 CALICO_VERSION=${CALICO_VERSION:-v3.24.5}
 CNAO_VERSION=${CNAO_VERSION:-v0.78.0}
 KIND_CONFIG=${KIND_CONFIG:-${DIR}/kind-config.yaml}
@@ -34,6 +33,12 @@ function install-calico() {
     kubectl create -f  https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/calico.yaml
     kubectl rollout status ds/calico-node -n kube-system --timeout=2m
 }
+
+function install-network-manager() {
+    kubectl apply -f network-manager.yaml
+    kubectl rollout status ds/network-manager
+}
+
 
 function install-ovn-kubevirt() {
     kubectl apply -f $DIR/../ovn-kubevirt.yaml
@@ -88,7 +93,7 @@ function wait-kubernetes-nmstate() {
 function build-cni-plugin() {
     (
         cd ${ROOT_DIR}        
-        go build -o ${OUTPUT_DIR}/${PLUGIN_NAME} ./cmd
+        go build -o ${OUTPUT_DIR}/${PLUGIN_NAME} ./cmd/plugin
 	    chmod 755 ${OUTPUT_DIR}/${PLUGIN_NAME}
     )
 }
@@ -101,17 +106,6 @@ function install-cni-plugin(){
         cp .out/kubeconfig .out/kubeconfig-internal
         kubectl config --kubeconfig=.out/kubeconfig-internal set-cluster kind-ovn-kubevirt --server=https://$(kubectl get svc kubernetes -o json |jq -r .spec.clusterIP)
         docker cp .out/kubeconfig-internal ${node}:/etc/cni/net.d/ovn-kubevirt-kubeconfig
-    done
-}
-
-function setup-br-ex() {
-    for pod in $(kubectl get pod -l app=ovn-kubevirt-node --no-headers  -o custom-columns=":metadata.name")   
-    do
-        kubectl exec $pod -c ovs-server -- ovs-vsctl --may-exist add-br br-ex
-        kubectl exec $pod -c ovs-server -- ovs-vsctl --may-exist add-port br-ex br-ex -- set Interface br-ex type=internal
-        # FIXME: This breaks kind
-        #kubectl exec $pod -c ovs-server -- ovs-vsctl --may-exist add-port br-ex eth0
-        kubectl exec $pod -c ovs-server -- ovs-vsctl set open . external-ids:ovn-bridge-mappings=external:br-ex
     done
 }
 
@@ -130,12 +124,13 @@ function run() {
         registry:2
     fi
 
-    cat <<EOF | kind create cluster --name "${KIND_CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}" --image "${KIND_IMAGE}":"${K8S_VERSION}" --config=- --retain
+    cat <<EOF | kind create cluster --name "${KIND_CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}" --image "${KIND_IMAGE}" --config=- --retain
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
+  ipFamily:
 # the default CNI will not be installed
-  disableDefaultCNI: true
+#  disableDefaultCNI: true
 nodes:
 - role: control-plane
 - role: worker
@@ -168,11 +163,15 @@ EOF
         docker exec -t $node bash -c "echo 'fs.inotify.max_user_watches=1048576' >> /etc/sysctl.conf"
         docker exec -t $node bash -c "echo 'fs.inotify.max_user_instances=512' >> /etc/sysctl.conf"
         docker exec -i $node bash -c "sysctl -p /etc/sysctl.conf"                      
+        docker exec "$node" sysctl --ignore net.ipv6.conf.all.disable_ipv6=0
+        docker exec "$node" sysctl --ignore net.ipv6.conf.all.forwarding=1
         if [[ "${node}" =~ worker ]]; then
             kubectl label nodes $node node-role.kubernetes.io/worker="" --overwrite=true
         fi
     done             
-    install-calico
+    #install-calico
+    #install-network-manager
+
     install-ovn-kubevirt
     install-network-operators
     install-kubevirt
@@ -181,7 +180,6 @@ EOF
     wait-network-operators
     wait-kubevirt
     #wait-kubernetes-nmstate
-    setup-br-ex
 }
 
 $1

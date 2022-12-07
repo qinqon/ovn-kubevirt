@@ -1013,6 +1013,8 @@ ovn-controller() {
       "
   }
 
+  echo "=============== ovn-controller  prepare breth0"
+  ovn-kube-util nics-to-bridge eth0
   
   run_as_ovs_user_if_needed \
     ${OVNCTL_PATH} --no-monitor start_controller \

@@ -2,9 +2,9 @@ REGISTRY ?= localhost:5001
 export KUBECONFIG := .out/kubeconfig
 
 build:
-	docker build . -t ${REGISTRY}/ovn-kubevirt
+	DOCKER_BUILDKIT=1 docker build . -t ${REGISTRY}/ovn-kubevirt
 push: build
-	docker push ${REGISTRY}/ovn-kubevirt
+	DOCKER_BUILDKIT=1 docker push ${REGISTRY}/ovn-kubevirt
 run: 
 	hack/kind.sh run
 

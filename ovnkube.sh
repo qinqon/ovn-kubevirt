@@ -1014,7 +1014,15 @@ ovn-controller() {
   }
 
   echo "=============== ovn-controller  prepare breth0"
-  ovn-kube-util nics-to-bridge eth0
+  touch /etc/default/openvswitch
+  if ! ovs-vsctl br-exists breth0; then
+    ovn-kube-util nics-to-bridge eth0
+  fi
+  ovs-vsctl set open . external_ids:ovn-bridge-mappings=physnet1:breth0
+  
+  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-remote=\"tcp:ovn-kubevirt-control-plane:6642\"
+  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-encap-ip=${POD_IP}
+  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-encap-type=geneve
   
   run_as_ovs_user_if_needed \
     ${OVNCTL_PATH} --no-monitor start_controller \
@@ -1022,15 +1030,12 @@ ovn-controller() {
     --ovn-controller-log="${ovn_loglevel_controller}" \
     ${ovn_controller_opts}
 
+  
   wait_for_event attempts=3 process_ready ovn-controller
   echo "=============== ovn-controller ========== running"
 
   tail --follow=name ${OVN_LOGDIR}/ovn-controller.log &
   controller_tail_pid=$!
-  
-  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-remote=\"tcp:ovn-kubevirt-control-plane:6642\"
-  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-encap-ip=${POD_IP}
-  ovs-vsctl --if-exists add Open_vSwitch . external_ids ovn-encap-type=geneve
 
   process_healthy ovn-controller ${controller_tail_pid}
   exit 10

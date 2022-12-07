@@ -40,14 +40,6 @@ function install-network-manager() {
 }
 
 
-function install-ovn-kubevirt() {
-    kubectl apply -f $DIR/../ovn-kubevirt.yaml
-}
-function wait-ovn-kubevirt() {
-    kubectl rollout status deployment/ovn-kubevirt-control-plane
-    kubectl rollout status ds/ovn-kubevirt-node
-}
-
 function install-network-operators() {
     kubectl apply -f https://github.com/kubevirt/cluster-network-addons-operator/releases/download/${CNAO_VERSION}/namespace.yaml
     kubectl apply -f https://github.com/kubevirt/cluster-network-addons-operator/releases/download/${CNAO_VERSION}/network-addons-config.crd.yaml
@@ -128,7 +120,6 @@ function run() {
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
-  ipFamily:
 # the default CNI will not be installed
 #  disableDefaultCNI: true
 nodes:
@@ -172,13 +163,11 @@ EOF
     #install-calico
     #install-network-manager
 
-    install-ovn-kubevirt
-    install-network-operators
-    install-kubevirt
+    #install-network-operators
+    #wait-network-operators
+    #install-kubevirt
+    #wait-kubevirt
     #install-kubernetes-nmstate
-    wait-ovn-kubevirt
-    wait-network-operators
-    wait-kubevirt
     #wait-kubernetes-nmstate
 }
 

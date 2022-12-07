@@ -9,10 +9,12 @@ run:
 	hack/kind.sh run
 
 apply: push
-	hack/kind.sh install-ovn-kubevirt
+	kubectl apply -f ovn-kubevirt.yaml
 
 delete: 
-	kubectl delete -f ovn-kubevirt.yaml --ignore-not-found
+	kubectl exec $(shell hack/node worker) -c ovs-server -- ovn-kube-util bridges-to-nic breth0
+	kubectl exec $(shell hack/node worker2) -c ovs-server -- ovn-kube-util bridges-to-nic breth0
+	kubectl delete --wait=true --cascade=foreground -f ovn-kubevirt.yaml --ignore-not-found
 
 install: plugin
 	hack/kind.sh install-cni-plugin
@@ -25,6 +27,8 @@ plugin:
 	hack/kind.sh build-cni-plugin
 
 sync: delete apply
+	kubectl rollout status deployment/ovn-kubevirt-control-plane
+	kubectl rollout status ds/ovn-kubevirt-node
 
 logs:
 	kubectl logs -l app=ovn-kubevirt --all-containers --tail=100000

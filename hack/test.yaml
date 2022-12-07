@@ -23,7 +23,8 @@ spec:
             "subnet": "10.0.0.0/24",
             "exclude-ips": "10.0.0.1..10.0.0.10",
             "router": "10.0.0.1",
-            "lease-time": "3600"
+            "lease-time": "3600",
+            "network-name": "physnet1"
           }
     ]
     }
@@ -44,8 +45,6 @@ spec:
           bus: virtio
         name: cloudinitdisk
       interfaces:
-      - masquerade: {}
-        name: pod
       - bridge: {}
         name: multus
         macAddress: 1a:3c:0f:bf:92:50
@@ -53,8 +52,6 @@ spec:
       requests:
         memory: 128Mi
   networks:
-  - name: pod
-    pod: {}
   - name: multus
     multus:
       networkName: ovn
@@ -67,7 +64,7 @@ spec:
       networkData: |
         version: 2
         ethernets:
-          eth1:
+          eth0:
             dhcp4: true
       userData: |-
         #cloud-config
@@ -91,8 +88,6 @@ spec:
           bus: virtio
         name: cloudinitdisk
       interfaces:
-      - masquerade: {}
-        name: pod
       - bridge: {}
         name: multus
         macAddress: 1a:3c:0f:bf:92:51
@@ -100,8 +95,6 @@ spec:
       requests:
         memory: 128Mi
   networks:
-  - name: pod
-    pod: {}
   - name: multus
     multus:
       networkName: ovn
@@ -114,7 +107,7 @@ spec:
       networkData: |
         version: 2
         ethernets:
-          eth1:
+          eth0:
             dhcp4: true
       userData: |-
         #cloud-config

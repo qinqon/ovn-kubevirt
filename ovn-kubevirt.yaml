@@ -6,6 +6,8 @@ metadata:
   labels:
     app: ovn-kubevirt-node
 spec:
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       app: ovn-kubevirt-node
@@ -14,15 +16,35 @@ spec:
       labels:
         app: ovn-kubevirt-node
     spec:
+      dnsPolicy: Default
       hostNetwork: true
       containers:
       - name: ovs-server
         image: localhost:5001/ovn-kubevirt
+        imagePullPolicy: Always
         args:
           - "/ovnkube.sh"
           - "ovs-server"
+        livenessProbe:
+          exec:
+            command:
+            - /usr/share/openvswitch/scripts/ovs-ctl
+            - status
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+          periodSeconds: 60
+        readinessProbe:
+          exec:
+            command: ["/usr/local/bin/ovn-kube-util", "readiness-probe", "-t", "ovs-daemons"]
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+          periodSeconds: 60
+
+ 
         securityContext:
+          runAsUser: 0
           privileged: true
+        terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
           - mountPath: /var/run/openvswitch
             name: var-run-openvswitch
@@ -30,8 +52,16 @@ spec:
             name: var-log-openvswitch
           - mountPath: /lib/modules
             name: host-lib-modules
+            readOnly: true
+          - mountPath: /sys
+            name: host-sys
+        lifecycle:                                                              
+          preStop:                                                              
+            exec:                                                               
+              command: ["/root/ovnkube.sh", "cleanup-ovs-server"]               
       - name: ovn-controller
         image: localhost:5001/ovn-kubevirt
+        imagePullPolicy: Always
         env:
         - name: POD_IP
           valueFrom:
@@ -42,17 +72,25 @@ spec:
           - "ovn-controller"
         securityContext:
           runAsUser: 0
-          privileged: true
           capabilities:
-            add:
-            - NET_ADMIN
+            add: ["ALL"]
+        readinessProbe:
+          exec:
+            command: ["/usr/local/bin/ovn-kube-util", "readiness-probe", "-t", "ovn-controller"]
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+          periodSeconds: 60
         volumeMounts:
           - mountPath: /var/run/openvswitch
+            name: var-run-openvswitch
+          - mountPath: /var/run/ovn
             name: var-run-openvswitch
           - mountPath: /var/log/openvswitch
             name: var-log-openvswitch
           - mountPath: /lib/modules
             name: host-lib-modules
+          - mountPath: /etc/default
+            name: etc-default
       volumes:
         - name: var-run-openvswitch
           hostPath:
@@ -62,13 +100,12 @@ spec:
         - name: host-lib-modules
           hostPath:
             path: /lib/modules
-        - name: dbus-socket
+        - name: etc-default
           hostPath:
-            path: /run/dbus/system_bus_socket
-            type: Socket
-        - name: sys-fs-cgroup
+            path: /etc/default
+        - name: host-sys
           hostPath:
-            path:  /sys/fs/cgroup
+            path: /sys
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -96,14 +133,19 @@ spec:
       nodeSelector:
         node-role.kubernetes.io/control-plane: ""
       hostNetwork: true
+      dnsPolicy: Default
       containers:
       - name: northd
         image: localhost:5001/ovn-kubevirt
+        imagePullPolicy: Always
+        env:
         args:
           - "/ovnkube.sh"
           - "run-ovn-northd"
         securityContext:
-          privileged: true
+          runAsUser: 0
+          capabilities:
+            add: ["SYS_NICE"]
         volumeMounts:
           - mountPath: /var/run/openvswitch
             name: var-run-openvswitch
@@ -113,8 +155,15 @@ spec:
             name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
+        readinessProbe:
+          exec:
+            command: ["/usr/local/bin/ovn-kube-util", "readiness-probe", "-t", "ovn-northd"]
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+          periodSeconds: 60
       - name: nb-ovsdb
         image: localhost:5001/ovn-kubevirt
+        imagePullPolicy: Always
         ports:
         - containerPort: 6641
         env:
@@ -126,7 +175,15 @@ spec:
           - "/ovnkube.sh"
           - "nb-ovsdb"
         securityContext:
-          privileged: true
+          runAsUser: 0
+          capabilities:
+            add: ["NET_ADMIN"]
+        readinessProbe:
+          exec:
+            command: ["/usr/local/bin/ovn-kube-util", "readiness-probe", "-t", "ovnnb-db"]
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+          periodSeconds: 60
         volumeMounts:
           - mountPath: /var/run/openvswitch
             name: var-run-openvswitch
@@ -138,6 +195,7 @@ spec:
             name: host-lib-modules
       - name: sb-ovsdb
         image: localhost:5001/ovn-kubevirt
+        imagePullPolicy: Always
         env:
         - name: K8S_NODE_IP                                                     
           valueFrom:                                                            
@@ -147,7 +205,9 @@ spec:
           - "/ovnkube.sh"
           - "sb-ovsdb"
         securityContext:
-          privileged: true
+          runAsUser: 0
+          capabilities:
+            add: ["NET_ADMIN"]
         volumeMounts:
           - mountPath: /var/run/openvswitch
             name: var-run-openvswitch
@@ -157,6 +217,12 @@ spec:
             name: var-run-ovn
           - mountPath: /lib/modules
             name: host-lib-modules
+        readinessProbe:
+          exec:
+            command: ["/usr/local/bin/ovn-kube-util", "readiness-probe", "-t", "ovnsb-db"]
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+          periodSeconds: 60
       volumes:
         - name: var-run-openvswitch
           emptyDir: {}

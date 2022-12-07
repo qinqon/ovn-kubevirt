@@ -30,6 +30,7 @@ import (
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+	"github.com/ovn-org/libovsdb/model"
 	"github.com/ovn-org/libovsdb/ovsdb"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -44,12 +45,14 @@ import (
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
 
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
 
 var (
 	pluginscheme = runtime.NewScheme()
+	enabled      = true
 )
 
 func init() {
@@ -63,10 +66,11 @@ func init() {
 
 type PluginConf struct {
 	types.NetConf
-	Router     string `json:"router"`
-	LeaseTime  string `json:"lease-time"`
-	Subnet     string `json:"subnet"`
-	ExcludeIps string `json:"exclude-ips"`
+	Router      string `json:"router"`
+	LeaseTime   string `json:"lease-time"`
+	Subnet      string `json:"subnet"`
+	ExcludeIps  string `json:"exclude-ips"`
+	NetworkName string `json:"network-name"`
 }
 
 type ExtraArgs struct {
@@ -76,7 +80,8 @@ type ExtraArgs struct {
 
 type CmdContext struct {
 	k8scli       k8sclient.Client
-	ovscli       ovsclient.Client
+	nbcli        ovsclient.Client
+	sbcli        ovsclient.Client
 	conf         *PluginConf
 	mac          string
 	vmi          *kubevirtv1.VirtualMachineInstance
@@ -130,6 +135,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		Options: map[string]string{
 			"lease_time": ctx.conf.LeaseTime,
 			"router":     ctx.conf.Router,
+			"dns_server": ctx.conf.Router,
 			"server_id":  ctx.conf.Router,
 			"server_mac": "c0:ff:ee:00:00:01",
 		},
@@ -140,10 +146,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	lr := nbdb.LogicalRouter{
-		Name: "public",
+		Name:    "public",
+		Enabled: &enabled,
 	}
 
-	if err := libovsdbops.CreateOrUpdateLogicalRouter(ctx.ovscli, &lr); err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalRouter(ctx.nbcli, &lr); err != nil {
 		return err
 	}
 
@@ -152,15 +159,17 @@ func cmdAdd(args *skel.CmdArgs) error {
 			Name:     ctx.conf.Name,
 			MAC:      "00:00:00:00:ff:01",
 			Networks: []string{ctx.conf.Router + "/24"}, // FIXME: Use bits from conf.Subnet
+			Enabled:  &enabled,
 		},
 		&nbdb.LogicalRouterPort{
 			Name:     "public",
 			MAC:      "00:00:20:20:12:13",
-			Networks: []string{"172.168.0.200/24"},
+			Networks: []string{"172.19.0.254/16"},
+			Enabled:  &enabled,
 		},
 	}
 
-	if err := libovsdbops.CreateOrUpdateLogicalRouterPorts(ctx.ovscli, &lr, lrps); err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalRouterPorts(ctx.nbcli, &lr, lrps); err != nil {
 		return err
 	}
 
@@ -178,7 +187,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 		address = ctx.mac + " " + address
 	}
 
-	enabled := true
 	lsps := []*nbdb.LogicalSwitchPort{
 		&nbdb.LogicalSwitchPort{
 			Name:          portName,
@@ -187,15 +195,16 @@ func cmdAdd(args *skel.CmdArgs) error {
 			Dhcpv4Options: &dhcpOptions.UUID,
 		},
 		&nbdb.LogicalSwitchPort{
-			Name:      ctx.conf.Name,
+			Name:      "rt-" + ctx.conf.Name,
 			Type:      "router",
 			Addresses: []string{"router"},
+			Enabled:   &enabled,
 			Options: map[string]string{
 				"router-port": ctx.conf.Name,
 			},
 		},
 	}
-	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.ovscli, &ls, lsps...); err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.nbcli, &ls, lsps...); err != nil {
 		return err
 	}
 
@@ -207,29 +216,46 @@ func cmdAdd(args *skel.CmdArgs) error {
 			Name:      "ln-public",
 			Type:      "localnet",
 			Addresses: []string{"unknown"},
+			Enabled:   &enabled,
 			Options: map[string]string{
-				"network_name": "external",
+				"network_name": ctx.conf.NetworkName,
 			},
 		},
 		&nbdb.LogicalSwitchPort{
-			Name:      "lr-public",
+			Name:      "rt-public",
 			Type:      "router",
 			Addresses: []string{"router"},
+			Enabled:   &enabled,
 			Options: map[string]string{
-				"router_port": "public",
+				"router-port": "public",
 			},
 		},
 	}
-	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.ovscli, &lsPublic, lspsPublic...); err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.nbcli, &lsPublic, lspsPublic...); err != nil {
 		return err
 	}
 
+	chassisList, err := libovsdbops.ListChassis(ctx.sbcli)
+	if err != nil {
+		return err
+	}
+
+	var selectedChassis *sbdb.Chassis
+	for _, chassis := range chassisList {
+		if chassis.Hostname == "ovn-kubevirt-worker" {
+			selectedChassis = chassis
+		}
+	}
+	if selectedChassis == nil {
+		return fmt.Errorf("ovn-kubevirt-worker chassis not found")
+	}
+
 	gatewayChassis := &nbdb.GatewayChassis{
-		Name:        "worker",
-		ChassisName: "worker",
+		Name:        selectedChassis.Hostname,
+		ChassisName: selectedChassis.Name,
 		Priority:    20,
 	}
-	if err := libovsdbops.CreateOrUpdateGatewayChassis(ctx.ovscli, lrps[1], gatewayChassis); err != nil {
+	if err := libovsdbops.CreateOrUpdateGatewayChassis(ctx.nbcli, lrps[1], gatewayChassis); err != nil {
 		return err
 	}
 	return types.PrintResult(&current.Result{}, ctx.conf.CNIVersion)
@@ -251,7 +277,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	portName := composePortName(ctx.vmi.Namespace, ctx.vmi.Name)
-	if err := libovsdbops.DeleteLogicalSwitchPorts(ctx.ovscli, &nbdb.LogicalSwitch{Name: ctx.conf.Name}, &nbdb.LogicalSwitchPort{Name: portName}); err != nil {
+	if err := libovsdbops.DeleteLogicalSwitchPorts(ctx.nbcli, &nbdb.LogicalSwitch{Name: ctx.conf.Name}, &nbdb.LogicalSwitchPort{Name: portName}); err != nil {
 		return err
 	}
 
@@ -273,13 +299,26 @@ func main() {
 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("OVN kubevirt"))
 }
 
-func newNBOVNClient() (ovsclient.Client, error) {
+func newNBClient() (ovsclient.Client, error) {
 	ovsNbModel, err := nbdb.FullDatabaseModel()
 	if err != nil {
 		return nil, err
 	}
 
-	cli, err := ovsclient.NewOVSDBClient(ovsNbModel, ovsclient.WithEndpoint("tcp:ovn-kubevirt-control-plane:6641"))
+	return newOVSClient(ovsNbModel, "6641")
+}
+
+func newSBClient() (ovsclient.Client, error) {
+	ovsSbModel, err := sbdb.FullDatabaseModel()
+	if err != nil {
+		return nil, err
+	}
+
+	return newOVSClient(ovsSbModel, "6642")
+}
+
+func newOVSClient(ovsModel model.ClientDBModel, port string) (ovsclient.Client, error) {
+	cli, err := ovsclient.NewOVSDBClient(ovsModel, ovsclient.WithEndpoint("tcp:ovn-kubevirt-control-plane:"+port))
 
 	err = cli.Connect(context.Background())
 	if err != nil {
@@ -289,6 +328,7 @@ func newNBOVNClient() (ovsclient.Client, error) {
 		return nil, err
 	}
 	return cli, nil
+
 }
 
 func newK8SClient() (k8sclient.Client, error) {
@@ -352,7 +392,12 @@ func loadCmdContext(args *skel.CmdArgs) (*CmdContext, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx.ovscli, err = newNBOVNClient()
+	ctx.nbcli, err = newNBClient()
+	if err != nil {
+		return nil, err
+	}
+
+	ctx.sbcli, err = newSBClient()
 	if err != nil {
 		return nil, err
 	}
@@ -398,13 +443,13 @@ func loadCmdContext(args *skel.CmdArgs) (*CmdContext, error) {
 
 func createOrUpdateDHCPOptions(ctx *CmdContext, dhcpOptions *nbdb.DHCPOptions) error {
 	dhcpOptionsResult := []nbdb.DHCPOptions{}
-	if err := ctx.ovscli.List(context.Background(), &dhcpOptionsResult); err != nil {
+	if err := ctx.nbcli.List(context.Background(), &dhcpOptionsResult); err != nil {
 		return fmt.Errorf("failed listing dhcp options: %v", err)
 	}
 	ops := []ovsdb.Operation{}
 	if len(dhcpOptionsResult) == 0 {
 		var err error
-		ops, err = ctx.ovscli.Create(dhcpOptions)
+		ops, err = ctx.nbcli.Create(dhcpOptions)
 		if err != nil {
 			return fmt.Errorf("failed creating dhcp options: %v", err)
 		}
@@ -412,7 +457,7 @@ func createOrUpdateDHCPOptions(ctx *CmdContext, dhcpOptions *nbdb.DHCPOptions) e
 		for _, d := range dhcpOptionsResult {
 			if d.Cidr == ctx.conf.Subnet {
 				var err error
-				ops, err = ctx.ovscli.Where(&d).Update(dhcpOptions)
+				ops, err = ctx.nbcli.Where(&d).Update(dhcpOptions)
 				if err != nil {
 					return fmt.Errorf("failed updating dhcp options: %v", err)
 				}
@@ -421,13 +466,13 @@ func createOrUpdateDHCPOptions(ctx *CmdContext, dhcpOptions *nbdb.DHCPOptions) e
 		}
 	}
 
-	_, err := libovsdbops.TransactAndCheck(ctx.ovscli, ops)
+	_, err := libovsdbops.TransactAndCheck(ctx.nbcli, ops)
 	if err != nil {
 		return fmt.Errorf("failed commiting dhcp options: %v", err)
 	}
 
 	dhcpOptionsResult = []nbdb.DHCPOptions{}
-	if err := ctx.ovscli.List(context.Background(), &dhcpOptionsResult); err != nil {
+	if err := ctx.nbcli.List(context.Background(), &dhcpOptionsResult); err != nil {
 		return fmt.Errorf("failed listing dhcp options: %v", err)
 	}
 	if len(dhcpOptionsResult) == 0 {

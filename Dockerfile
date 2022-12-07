@@ -12,8 +12,10 @@ FROM quay.io/fedora/fedora:37
 
 USER root
 
-RUN dnf install -y util-linux ovn NetworkManager NetworkManager-ovs ovn-central ovn-host openvswitch && \
+RUN dnf install -y util-linux ovn NetworkManager NetworkManager-ovs ovn-central ovn-host openvswitch procps-ng && \
     dnf clean all
+
+RUN mkdir -p /var/run/openvswitch
 
 COPY *.sh ./
 COPY --from=build /go/bin/ovn-kube-util /usr/local/bin

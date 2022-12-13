@@ -10,6 +10,8 @@ run:
 
 apply: push
 	kubectl apply -f ovn-kubevirt.yaml
+	kubectl rollout status deployment/ovn-kubevirt-control-plane
+	kubectl rollout status ds/ovn-kubevirt-node
 
 delete: 
 	kubectl exec $(shell hack/node worker) -c ovs-server -- ovn-kube-util bridges-to-nic breth0
@@ -27,8 +29,6 @@ plugin:
 	hack/kind.sh build-cni-plugin
 
 sync: delete apply
-	kubectl rollout status deployment/ovn-kubevirt-control-plane
-	kubectl rollout status ds/ovn-kubevirt-node
 
 logs:
 	kubectl logs -l app=ovn-kubevirt --all-containers --tail=100000

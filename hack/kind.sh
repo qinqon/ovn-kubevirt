@@ -101,6 +101,15 @@ function install-cni-plugin(){
     done
 }
 
+function install-cnv() {
+    install-network-operators
+    install-kubevirt
+    wait-network-operators
+    wait-kubevirt
+    #install-kubernetes-nmstate
+    #wait-kubernetes-nmstate
+}
+
 function run() {
     mkdir -p $OUTPUT_DIR
     if kind get clusters | grep "${KIND_CLUSTER_NAME}"; then
@@ -160,15 +169,8 @@ EOF
             kubectl label nodes $node node-role.kubernetes.io/worker="" --overwrite=true
         fi
     done             
-    #install-calico
-    #install-network-manager
-
-    #install-network-operators
-    #wait-network-operators
-    #install-kubevirt
-    #wait-kubevirt
-    #install-kubernetes-nmstate
-    #wait-kubernetes-nmstate
+    
+    install-cnv
 }
 
 $1

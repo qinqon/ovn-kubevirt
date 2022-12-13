@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -39,6 +40,7 @@ import (
 
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	ovsclient "github.com/ovn-org/libovsdb/client"
@@ -130,12 +132,17 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("%s: %v", output, err)
 	}
 
+	dnsServer, err := kubeDNSNameServer(ctx)
+	if err != nil {
+		return err
+	}
+
 	dhcpOptions := nbdb.DHCPOptions{
 		Cidr: ctx.conf.Subnet,
 		Options: map[string]string{
 			"lease_time": ctx.conf.LeaseTime,
 			"router":     ctx.conf.Router,
-			"dns_server": ctx.conf.Router,
+			"dns_server": dnsServer,
 			"server_id":  ctx.conf.Router,
 			"server_mac": "c0:ff:ee:00:00:01",
 		},
@@ -258,6 +265,23 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err := libovsdbops.CreateOrUpdateGatewayChassis(ctx.nbcli, lrps[1], gatewayChassis); err != nil {
 		return err
 	}
+
+	routerPortIP, _, err := net.ParseCIDR(lrps[1].Networks[0])
+	if err != nil {
+		return err
+	}
+
+	_, confSubnet, err := net.ParseCIDR(ctx.conf.Subnet)
+	if err != nil {
+		return err
+	}
+
+	if err := libovsdbops.CreateOrUpdateNATs(ctx.nbcli, &lr, libovsdbops.BuildSNAT(&routerPortIP, confSubnet, lrps[1].Name, nil)); err != nil {
+		return err
+	}
+
+	//TODO Copy worker default gw route to the public logical router
+
 	return types.PrintResult(&current.Result{}, ctx.conf.CNIVersion)
 }
 
@@ -480,4 +504,13 @@ func createOrUpdateDHCPOptions(ctx *CmdContext, dhcpOptions *nbdb.DHCPOptions) e
 	}
 	*dhcpOptions = dhcpOptionsResult[0]
 	return nil
+}
+
+func kubeDNSNameServer(ctx *CmdContext) (string, error) {
+	svc := &corev1.Service{}
+	if err := ctx.k8scli.Get(context.Background(), client.ObjectKey{Namespace: "kube-system", Name: "kube-dns"}, svc); err != nil {
+		return "", err
+	}
+
+	return svc.Spec.ClusterIP, nil
 }

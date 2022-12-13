@@ -162,15 +162,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	gwNodeIP, err := nodeIP(ctx, gwNode)
-	if err != nil {
-		return err
-	}
-	gwNodeMAC, err := ovsPortMACAddress("eth0")
-	if err != nil {
-		return fmt.Errorf("failed retrieving mac address from ovs port: %v", err)
-	}
-
 	lrps := []*nbdb.LogicalRouterPort{
 		&nbdb.LogicalRouterPort{
 			Name:     ctx.conf.Name,
@@ -180,8 +171,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		},
 		&nbdb.LogicalRouterPort{
 			Name:     "public",
-			MAC:      gwNodeMAC.String(),
-			Networks: []string{gwNodeIP + "/16"}, // TODO: Get bits from node
+			MAC:      "00:00:20:20:12:13",
+			Networks: []string{"172.19.0.254/16"},
 			Enabled:  &enabled,
 		},
 	}
@@ -291,10 +282,14 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
+	gwNodeIP, err := nodeIP(ctx, gwNode)
+	if err != nil {
+		return err
+	}
 	// Add default gateway routes to the public logical router
 	defaultGwRoute := nbdb.LogicalRouterStaticRoute{
 		IPPrefix:   "0.0.0.0/0",
-		Nexthop:    "172.19.0.1", // TODO: Discover it from node
+		Nexthop:    gwNodeIP,
 		OutputPort: &lrps[1].Name,
 	}
 	p := func(item *nbdb.LogicalRouterStaticRoute) bool {

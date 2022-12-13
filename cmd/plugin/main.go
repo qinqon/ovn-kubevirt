@@ -55,6 +55,7 @@ import (
 var (
 	pluginscheme = runtime.NewScheme()
 	enabled      = true
+	gwNode       = "ovn-kubevirt-worker" // TODO Pass it at the conf
 )
 
 func init() {
@@ -161,6 +162,15 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
+	gwNodeIP, err := nodeIP(ctx, gwNode)
+	if err != nil {
+		return err
+	}
+	gwNodeMAC, err := ovsPortMACAddress("eth0")
+	if err != nil {
+		return fmt.Errorf("failed retrieving mac address from ovs port: %v", err)
+	}
+
 	lrps := []*nbdb.LogicalRouterPort{
 		&nbdb.LogicalRouterPort{
 			Name:     ctx.conf.Name,
@@ -170,8 +180,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		},
 		&nbdb.LogicalRouterPort{
 			Name:     "public",
-			MAC:      "00:00:20:20:12:13",
-			Networks: []string{"172.19.0.254/16"},
+			MAC:      gwNodeMAC.String(),
+			Networks: []string{gwNodeIP + "/16"}, // TODO: Get bits from node
 			Enabled:  &enabled,
 		},
 	}
@@ -249,12 +259,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	var selectedChassis *sbdb.Chassis
 	for _, chassis := range chassisList {
-		if chassis.Hostname == "ovn-kubevirt-worker" {
+		if chassis.Hostname == gwNode {
 			selectedChassis = chassis
 		}
 	}
 	if selectedChassis == nil {
-		return fmt.Errorf("ovn-kubevirt-worker chassis not found")
+		return fmt.Errorf("%s chassis not found", gwNode)
 	}
 
 	gatewayChassis := &nbdb.GatewayChassis{
@@ -266,6 +276,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
+	// Masquerade
 	routerPortIP, _, err := net.ParseCIDR(lrps[1].Networks[0])
 	if err != nil {
 		return err
@@ -280,8 +291,18 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	//TODO Copy worker default gw route to the public logical router
-
+	// Add default gateway routes to the public logical router
+	defaultGwRoute := nbdb.LogicalRouterStaticRoute{
+		IPPrefix:   "0.0.0.0/0",
+		Nexthop:    "172.19.0.1", // TODO: Discover it from node
+		OutputPort: &lrps[1].Name,
+	}
+	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+		return item.OutputPort != nil && *item.OutputPort == *defaultGwRoute.OutputPort && item.IPPrefix == defaultGwRoute.IPPrefix
+	}
+	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, lr.Name, &defaultGwRoute, p); err != nil {
+		return err
+	}
 	return types.PrintResult(&current.Result{}, ctx.conf.CNIVersion)
 }
 
@@ -389,23 +410,27 @@ func parseArgs(envArgsString string) (*ExtraArgs, error) {
 	return nil, nil
 }
 
-func runOVSVsctl(args ...string) ([]byte, error) {
+func runOVSVsctl(args ...string) (string, error) {
 	kubeconfigEnv := []string{"KUBECONFIG=/etc/cni/net.d/ovn-kubevirt-kubeconfig"}
 	hostname, err := os.Hostname()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	//TODO: Use k8s clientset
 	cmd := exec.Command("kubectl", "get", "pod", "-l", "app=ovn-kubevirt-node", "--no-headers", "-o", "name", "--field-selector", fmt.Sprintf("spec.nodeName=%s", hostname))
 	cmd.Env = kubeconfigEnv
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return output, err
+		return "", fmt.Errorf("%s: %v", output, err)
 	}
 	podName := strings.TrimSuffix(string(output), "\n")
 	cmd = exec.Command("kubectl", append([]string{"exec", podName, "-c", "ovs-server", "--", "ovs-vsctl"}, args...)...)
 	cmd.Env = kubeconfigEnv
-	return cmd.CombinedOutput()
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s: %v", output, err)
+	}
+	return strings.Trim(strings.TrimSpace(string(output)), "\""), nil
 }
 
 func loadCmdContext(args *skel.CmdArgs) (*CmdContext, error) {
@@ -513,4 +538,30 @@ func kubeDNSNameServer(ctx *CmdContext) (string, error) {
 	}
 
 	return svc.Spec.ClusterIP, nil
+}
+
+func nodeIP(ctx *CmdContext, nodeName string) (string, error) {
+	node := &corev1.Node{}
+	if err := ctx.k8scli.Get(context.Background(), client.ObjectKey{Name: nodeName}, node); err != nil {
+		return "", err
+	}
+	if len(node.Status.Addresses) == 0 {
+		return "", fmt.Errorf("missing address at node %s", nodeName)
+	}
+	return node.Status.Addresses[0].Address, nil
+}
+
+// GetOVSPortMACAddress returns the MAC address of a given OVS port
+func ovsPortMACAddress(portName string) (net.HardwareAddr, error) {
+	output, err := runOVSVsctl("--if-exists", "get",
+		"interface", portName, "mac_in_use")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get MAC address for %q: %q: %v",
+			portName, string(output), err)
+	}
+	macAddress := string(output)
+	if macAddress == "[]" {
+		return nil, fmt.Errorf("no mac_address found for %q", portName)
+	}
+	return net.ParseMAC(macAddress)
 }

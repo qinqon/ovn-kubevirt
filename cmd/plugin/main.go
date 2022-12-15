@@ -88,6 +88,25 @@ type CmdContext struct {
 	mac          string
 	vmi          *kubevirtv1.VirtualMachineInstance
 	virtLauncher *corev1.Pod
+	gateway      *Gateway
+	joinRouter   *JoinRouter
+	hostname     string
+}
+
+type GatewayRouter struct {
+	lr       *nbdb.LogicalRouter
+	gwPort   *nbdb.LogicalRouterPort
+	joinPort *nbdb.LogicalRouterPort
+}
+
+type Gateway struct {
+	routers map[string]*GatewayRouter
+}
+
+type JoinRouter struct {
+	lr          *nbdb.LogicalRouter
+	gwPorts     map[string]*nbdb.LogicalRouterPort
+	tenantPorts map[string]*nbdb.LogicalRouterPort
 }
 
 // parseConfig parses the supplied configuration (and prevResult) from stdin.
@@ -114,7 +133,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	logCall("ADD", args)
 	ctx, err := loadCmdContext(args)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed loading cmd config: %v", err)
 	}
 
 	if ctx.conf.PrevResult == nil {
@@ -127,9 +146,59 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	portName := composePortName(ctx.vmi.Namespace, ctx.vmi.Name)
-	output, err := runOVSVsctl("add", "Interface", prevResult.Interfaces[0].Name, "external_ids", fmt.Sprintf("iface-id=%s", portName))
+	output, err := runOVSVsctl(ctx, "add", "Interface", prevResult.Interfaces[0].Name, "external_ids", fmt.Sprintf("iface-id=%s", portName))
 	if err != nil {
 		return fmt.Errorf("%s: %v", output, err)
+	}
+
+	wNodes, err := workerNodes(ctx)
+	if err != nil {
+		return err
+	}
+
+	ctx.joinRouter = newJoinRouter()
+	ctx.joinRouter.addTenantPort(ctx)
+
+	ctx.gateway = &Gateway{routers: map[string]*GatewayRouter{}}
+	for i, wNode := range wNodes {
+		joinGwPort := ctx.joinRouter.addGatewayPort(ctx, i, &wNode)
+
+		gwRouter := GatewayRouter{
+			lr: &nbdb.LogicalRouter{
+				Name:    wNode.Name,
+				Enabled: &enabled,
+			},
+		}
+
+		ctx.gateway.routers[gwRouter.lr.Name] = &gwRouter
+
+		gwRouter.setNodePort(ctx, i, &wNode)
+		gwRouter.setJoinPort(ctx, i, &wNode)
+
+		joinGwPort.Peer = &gwRouter.joinPort.Name
+		gwRouter.joinPort.Peer = &joinGwPort.Name
+	}
+
+	if err := ctx.joinRouter.ensure(ctx); err != nil {
+		return fmt.Errorf("failed ensuring join router: %v", err)
+	}
+
+	if err := ctx.gateway.ensure(ctx); err != nil {
+		return fmt.Errorf("failed ensuring gateway: %v", err)
+	}
+
+	ls := nbdb.LogicalSwitch{
+		Name: ctx.conf.Name,
+		OtherConfig: map[string]string{
+			"subnet":      ctx.conf.Subnet,
+			"exclude_ips": ctx.conf.ExcludeIps,
+		},
+	}
+
+	address := "dynamic"
+	// virt-launcher pod has the mac on the annotation
+	if ctx.mac != "" {
+		address = ctx.mac + " " + address
 	}
 
 	dnsServer, err := kubeDNSNameServer(ctx)
@@ -148,61 +217,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 		},
 	}
 
-	if err := createOrUpdateDHCPOptions(ctx, &dhcpOptions); err != nil {
+	if err := ensureDHCPOptions(ctx, &dhcpOptions); err != nil {
 		return err
 	}
-
-	lr := nbdb.LogicalRouter{
-		Name:    "public",
-		Enabled: &enabled,
-	}
-
-	if err := libovsdbops.CreateOrUpdateLogicalRouter(ctx.nbcli, &lr); err != nil {
-		return err
-	}
-
-	lrps := []*nbdb.LogicalRouterPort{
-		&nbdb.LogicalRouterPort{
-			Name:     ctx.conf.Name,
-			MAC:      "00:00:00:00:ff:01",
-			Networks: []string{ctx.conf.Router + "/24"}, // FIXME: Use bits from conf.Subnet
-			Enabled:  &enabled,
-		},
-	}
-
-	wNodes, err := workerNodes(ctx)
-	if err != nil {
-		return err
-	}
-
-	for i, wNode := range wNodes {
-		lrps = append(lrps,
-			&nbdb.LogicalRouterPort{
-				Name:     wNode.Name,
-				MAC:      fmt.Sprintf("00:00:20:20:12:1%d", i),
-				Networks: []string{fmt.Sprintf("172.19.0.25%d/16", 4-i)},
-				Enabled:  &enabled,
-			})
-	}
-
-	if err := libovsdbops.CreateOrUpdateLogicalRouterPorts(ctx.nbcli, &lr, lrps); err != nil {
-		return err
-	}
-
-	ls := nbdb.LogicalSwitch{
-		Name: ctx.conf.Name,
-		OtherConfig: map[string]string{
-			"subnet":      ctx.conf.Subnet,
-			"exclude_ips": ctx.conf.ExcludeIps,
-		},
-	}
-
-	address := "dynamic"
-	// virt-launcher pod has the mac on the annotation
-	if ctx.mac != "" {
-		address = ctx.mac + " " + address
-	}
-
 	lsps := []*nbdb.LogicalSwitchPort{
 		&nbdb.LogicalSwitchPort{
 			Name:          portName,
@@ -224,12 +241,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	lsPublic := nbdb.LogicalSwitch{
-		Name: "public",
+	joinLS := nbdb.LogicalSwitch{
+		Name: "join",
 	}
-	lspsPublic := []*nbdb.LogicalSwitchPort{
+	joinLSPs := []*nbdb.LogicalSwitchPort{
 		&nbdb.LogicalSwitchPort{
-			Name:      "ln-public",
+			Name:      "ln-join",
 			Type:      "localnet",
 			Addresses: []string{"unknown"},
 			Enabled:   &enabled,
@@ -239,102 +256,37 @@ func cmdAdd(args *skel.CmdArgs) error {
 		},
 	}
 
-	for _, wNode := range wNodes {
-		lspsPublic = append(lspsPublic, &nbdb.LogicalSwitchPort{
-			Name:      "rt-" + wNode.Name,
+	for _, gwRouter := range ctx.gateway.routers {
+		joinLSPs = append(joinLSPs, &nbdb.LogicalSwitchPort{
+			Name:      "rt-" + gwRouter.lr.Name,
 			Type:      "router",
 			Addresses: []string{"router"},
 			Enabled:   &enabled,
 			Options: map[string]string{
-				"router-port": wNode.Name,
+				"router-port": gwRouter.lr.Name,
 			},
 		})
 	}
-	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.nbcli, &lsPublic, lspsPublic...); err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.nbcli, &joinLS, joinLSPs...); err != nil {
 		return err
 	}
 
-	chassisList, err := libovsdbops.ListChassis(ctx.sbcli)
-	if err != nil {
-		return err
-	}
-	for _, wNode := range wNodes {
-		var selectedChassis *sbdb.Chassis
-		for _, chassis := range chassisList {
-			if chassis.Hostname == wNode.Name {
-				selectedChassis = chassis
-				break
-			}
-		}
-		if selectedChassis == nil {
-			return fmt.Errorf("%s chassis not found", wNode.Name)
-		}
-
-		gatewayChassis := &nbdb.GatewayChassis{
-			Name:        selectedChassis.Hostname,
-			ChassisName: selectedChassis.Name,
-			Priority:    20,
-		}
-		selectedLRP, err := libovsdbops.GetLogicalRouterPort(ctx.nbcli, &nbdb.LogicalRouterPort{Name: wNode.Name})
-		if err != nil {
-			return fmt.Errorf("lrp %s not found: %v", wNode.Name, err)
-		}
-		if err := libovsdbops.CreateOrUpdateGatewayChassis(ctx.nbcli, selectedLRP, gatewayChassis); err != nil {
-			return err
-		}
-	}
-
-	// Post routing Masquerade: VM IP -> hypervisor LRP por IP
-	hostname, err := os.Hostname()
-	if err != nil {
-		return err
-	}
-	currentNodeLRP, err := libovsdbops.GetLogicalRouterPort(ctx.nbcli, &nbdb.LogicalRouterPort{Name: hostname})
-	if err != nil {
-		return fmt.Errorf("lrp %s not found: %v", hostname, err)
-	}
-	currentNodeLRPIP, _, err := net.ParseCIDR(currentNodeLRP.Networks[0])
-	if err != nil {
+	if err := ctx.gateway.masqueradeTenantSubnet(ctx, lsps[0]); err != nil {
 		return err
 	}
 
-	vmLSP, err := libovsdbops.GetLogicalSwitchPort(ctx.nbcli, lsps[0])
-	if err != nil {
-		return err
-	}
-	if vmLSP.DynamicAddresses == nil || *vmLSP.DynamicAddresses == "" || len(strings.Split(*vmLSP.DynamicAddresses, " ")) < 2 {
-		return fmt.Errorf("missing dynamic addresses at lsp %s", lsps[0].Name)
-	}
-
-	vmAddress := strings.Split(*vmLSP.DynamicAddresses, " ")[1]
-	masqueradeNAT := &nbdb.NAT{
-		ExternalIP:  currentNodeLRPIP.String(),
-		LogicalIP:   vmAddress,
-		LogicalPort: &currentNodeLRP.Name,
-		Type:        nbdb.NATTypeSNAT,
-	}
-	if err := libovsdbops.CreateOrUpdateNATs(ctx.nbcli, &lr, masqueradeNAT); err != nil {
+	if err := ctx.gateway.routeAllIPsToNode(ctx); err != nil {
 		return err
 	}
 
-	currentNodeIP, err := nodeIP(ctx, hostname)
-	if err != nil {
+	if err := ctx.gateway.routeTenantSubnetToJoinRouter(ctx); err != nil {
 		return err
 	}
 
-	// Route entry per VM: VM IP -> hypervisor IP
-	defaultGwRoute := nbdb.LogicalRouterStaticRoute{
-		IPPrefix: vmAddress,
-		Nexthop:  currentNodeIP,
-		Policy:   &nbdb.LogicalRouterStaticRoutePolicySrcIP,
-	}
-
-	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
-		return item.OutputPort != nil && *item.OutputPort == *defaultGwRoute.OutputPort && item.IPPrefix == defaultGwRoute.IPPrefix
-	}
-	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, lr.Name, &defaultGwRoute, p); err != nil {
+	if err := ctx.joinRouter.routeDynamicAddressToGw(ctx, lsps[0]); err != nil {
 		return err
 	}
+
 	return types.PrintResult(&current.Result{}, ctx.conf.CNIVersion)
 }
 
@@ -442,14 +394,10 @@ func parseArgs(envArgsString string) (*ExtraArgs, error) {
 	return nil, nil
 }
 
-func runOVSVsctl(args ...string) (string, error) {
+func runOVSVsctl(ctx *CmdContext, args ...string) (string, error) {
 	kubeconfigEnv := []string{"KUBECONFIG=/etc/cni/net.d/ovn-kubevirt-kubeconfig"}
-	hostname, err := os.Hostname()
-	if err != nil {
-		return "", err
-	}
 	//TODO: Use k8s clientset
-	cmd := exec.Command("kubectl", "get", "pod", "-l", "app=ovn-kubevirt-node", "--no-headers", "-o", "name", "--field-selector", fmt.Sprintf("spec.nodeName=%s", hostname))
+	cmd := exec.Command("kubectl", "get", "pod", "-l", "app=ovn-kubevirt-node", "--no-headers", "-o", "name", "--field-selector", fmt.Sprintf("spec.nodeName=%s", ctx.hostname))
 	cmd.Env = kubeconfigEnv
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -469,6 +417,11 @@ func loadCmdContext(args *skel.CmdArgs) (*CmdContext, error) {
 	ctx := CmdContext{}
 
 	var err error
+	ctx.hostname, err = os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+
 	ctx.k8scli, err = newK8SClient()
 	if err != nil {
 		return nil, err
@@ -522,7 +475,7 @@ func loadCmdContext(args *skel.CmdArgs) (*CmdContext, error) {
 	return &ctx, nil
 }
 
-func createOrUpdateDHCPOptions(ctx *CmdContext, dhcpOptions *nbdb.DHCPOptions) error {
+func ensureDHCPOptions(ctx *CmdContext, dhcpOptions *nbdb.DHCPOptions) error {
 	dhcpOptionsResult := []nbdb.DHCPOptions{}
 	if err := ctx.nbcli.List(context.Background(), &dhcpOptionsResult); err != nil {
 		return fmt.Errorf("failed listing dhcp options: %v", err)
@@ -583,21 +536,6 @@ func nodeIP(ctx *CmdContext, nodeName string) (string, error) {
 	return node.Status.Addresses[0].Address, nil
 }
 
-// GetOVSPortMACAddress returns the MAC address of a given OVS port
-func ovsPortMACAddress(portName string) (net.HardwareAddr, error) {
-	output, err := runOVSVsctl("--if-exists", "get",
-		"interface", portName, "mac_in_use")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get MAC address for %q: %q: %v",
-			portName, string(output), err)
-	}
-	macAddress := string(output)
-	if macAddress == "[]" {
-		return nil, fmt.Errorf("no mac_address found for %q", portName)
-	}
-	return net.ParseMAC(macAddress)
-}
-
 func workerNodes(ctx *CmdContext) ([]corev1.Node, error) {
 	nodeList := &corev1.NodeList{}
 	if err := ctx.k8scli.List(context.Background(), nodeList, client.HasLabels([]string{"node-role.kubernetes.io/worker"})); err != nil {
@@ -605,4 +543,230 @@ func workerNodes(ctx *CmdContext) ([]corev1.Node, error) {
 	}
 	return nodeList.Items, nil
 
+}
+
+func (g *GatewayRouter) ensure(ctx *CmdContext) error {
+	if err := libovsdbops.CreateOrUpdateLogicalRouter(ctx.nbcli, g.lr); err != nil {
+		return err
+	}
+
+	if err := libovsdbops.CreateOrUpdateLogicalRouterPorts(ctx.nbcli, g.lr, []*nbdb.LogicalRouterPort{g.gwPort, g.joinPort}); err != nil {
+		return err
+	}
+	chassisList, err := libovsdbops.ListChassis(ctx.sbcli)
+	if err != nil {
+		return err
+	}
+	var selectedChassis *sbdb.Chassis
+	for _, chassis := range chassisList {
+		if chassis.Hostname == g.gwPort.Name {
+			selectedChassis = chassis
+			break
+		}
+	}
+	if selectedChassis == nil {
+		return fmt.Errorf("%s chassis not found", g.lr.Name)
+	}
+
+	gatewayChassis := &nbdb.GatewayChassis{
+		Name:        selectedChassis.Hostname,
+		ChassisName: selectedChassis.Name,
+		Priority:    20,
+	}
+	if err := libovsdbops.CreateOrUpdateGatewayChassis(ctx.nbcli, g.gwPort, gatewayChassis); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (j *JoinRouter) routeDynamicAddressToGw(ctx *CmdContext, lsp *nbdb.LogicalSwitchPort) error {
+
+	// Post routing Masquerade: VM IP -> hypervisor LRP por IP
+	currentGwRouter, ok := ctx.gateway.routers[ctx.hostname]
+	if !ok {
+		return fmt.Errorf("gw router %s not found", ctx.hostname)
+	}
+	currentGwLRPIP, _, err := net.ParseCIDR(currentGwRouter.joinPort.Networks[0])
+	if err != nil {
+		return err
+	}
+
+	// We need to read the lsp again to get the assigned address
+	lsp, err = libovsdbops.GetLogicalSwitchPort(ctx.nbcli, lsp)
+	if err != nil {
+		return err
+	}
+
+	if lsp.DynamicAddresses == nil || *lsp.DynamicAddresses == "" || len(strings.Split(*lsp.DynamicAddresses, " ")) < 2 {
+		return fmt.Errorf("missing dynamic addresses at lsp %s", lsp.Name)
+	}
+
+	address := strings.Split(*lsp.DynamicAddresses, " ")[1]
+	route := nbdb.LogicalRouterStaticRoute{
+		IPPrefix:   address,
+		Nexthop:    currentGwLRPIP.String(),
+		OutputPort: &j.gwPorts[ctx.hostname].Name,
+		Policy:     &nbdb.LogicalRouterStaticRoutePolicySrcIP,
+	}
+
+	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+		return item.Policy != nil && *item.Policy == *route.Policy && item.OutputPort != nil && *item.OutputPort == *route.OutputPort && item.Nexthop == route.Nexthop && item.IPPrefix == route.IPPrefix
+	}
+	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, j.lr.Name, &route, p); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (g *Gateway) routeAllIPsToNode(ctx *CmdContext) error {
+	currentNodeIP, err := nodeIP(ctx, ctx.hostname)
+	if err != nil {
+		return err
+	}
+
+	defaultGwRoute := nbdb.LogicalRouterStaticRoute{
+		IPPrefix: "0.0.0.0/0",
+		Nexthop:  currentNodeIP,
+	}
+
+	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+		return item.Nexthop == defaultGwRoute.Nexthop && item.IPPrefix == defaultGwRoute.IPPrefix
+	}
+	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, ctx.hostname, &defaultGwRoute, p); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (g *Gateway) masqueradeTenantSubnet(ctx *CmdContext, lsp *nbdb.LogicalSwitchPort) error {
+	currentGwRouter, ok := g.routers[ctx.hostname]
+	if !ok {
+		return fmt.Errorf("gw router %s not found", ctx.hostname)
+	}
+	currentGwLRPIP, _, err := net.ParseCIDR(currentGwRouter.gwPort.Networks[0])
+	if err != nil {
+		return err
+	}
+
+	masqueradeNAT := &nbdb.NAT{
+		ExternalIP: currentGwLRPIP.String(),
+		LogicalIP:  ctx.conf.Subnet,
+		Type:       nbdb.NATTypeSNAT,
+	}
+	if err := libovsdbops.CreateOrUpdateNATs(ctx.nbcli, currentGwRouter.lr, masqueradeNAT); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *Gateway) routeTenantSubnetToJoinRouter(ctx *CmdContext) error {
+
+	joinGwPort, ok := ctx.joinRouter.gwPorts[ctx.hostname]
+	if !ok {
+		fmt.Errorf("missing gw port for host %s at join lr", ctx.hostname)
+	}
+	joinGwPortIP, _, err := net.ParseCIDR(joinGwPort.Networks[0])
+	if err != nil {
+		return err
+	}
+	tenantSubnetRoute := nbdb.LogicalRouterStaticRoute{
+		IPPrefix: ctx.conf.Subnet,
+		Nexthop:  joinGwPortIP.String(),
+	}
+
+	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+		return item.Nexthop == tenantSubnetRoute.Nexthop && item.IPPrefix == tenantSubnetRoute.IPPrefix
+	}
+	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, ctx.hostname, &tenantSubnetRoute, p); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (g *Gateway) ensure(ctx *CmdContext) error {
+	for _, gr := range g.routers {
+		if err := gr.ensure(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newJoinRouter() *JoinRouter {
+	return &JoinRouter{
+		lr: &nbdb.LogicalRouter{
+			Name:    "join",
+			Enabled: &enabled,
+		},
+		tenantPorts: map[string]*nbdb.LogicalRouterPort{},
+		gwPorts:     map[string]*nbdb.LogicalRouterPort{},
+	}
+}
+
+func (j *JoinRouter) ensure(ctx *CmdContext) error {
+	if err := libovsdbops.CreateOrUpdateLogicalRouter(ctx.nbcli, j.lr); err != nil {
+		return err
+	}
+
+	ports := []*nbdb.LogicalRouterPort{}
+	for _, p := range j.gwPorts {
+		ports = append(ports, p)
+	}
+	for _, p := range j.tenantPorts {
+		ports = append(ports, p)
+	}
+	if err := libovsdbops.CreateOrUpdateLogicalRouterPorts(ctx.nbcli, j.lr, ports); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (j *JoinRouter) addTenantPort(ctx *CmdContext) {
+	j.tenantPorts[ctx.conf.Name] = &nbdb.LogicalRouterPort{
+		Name:     ctx.conf.Name,
+		MAC:      "00:00:00:00:ff:01",
+		Networks: []string{ctx.conf.Router + "/24"}, // FIXME: Use bits from conf.Subnet
+		Enabled:  &enabled,
+	}
+}
+
+func (j *JoinRouter) addGatewayPort(ctx *CmdContext, i int, wNode *corev1.Node) *nbdb.LogicalRouterPort {
+	gwPort := &nbdb.LogicalRouterPort{
+		Name:     joinToGwPortName(wNode.Name),
+		MAC:      fmt.Sprintf("00:00:21:20:12:1%d", i),
+		Networks: []string{fmt.Sprintf("10.64.0.1%d/24", i)},
+		Enabled:  &enabled,
+	}
+	j.gwPorts[wNode.Name] = gwPort
+	return gwPort
+}
+
+func (g *GatewayRouter) setNodePort(ctx *CmdContext, i int, wNode *corev1.Node) {
+	g.gwPort = &nbdb.LogicalRouterPort{
+		Name:     wNode.Name,
+		MAC:      fmt.Sprintf("00:00:21:20:10:1%d", i),
+		Networks: []string{fmt.Sprintf("172.19.0.25%d/16", 4-i)},
+		Enabled:  &enabled,
+	}
+}
+
+func (g *GatewayRouter) setJoinPort(ctx *CmdContext, i int, wNode *corev1.Node) {
+	g.joinPort = &nbdb.LogicalRouterPort{
+		Name:     gwToJoinPortName(wNode.Name),
+		MAC:      fmt.Sprintf("00:00:21:20:11:1%d", i),
+		Networks: []string{fmt.Sprintf("10.64.0.2%d/24", i)},
+		Enabled:  &enabled,
+	}
+}
+
+func joinToGwPortName(nodeName string) string {
+	return "join-to-" + nodeName
+}
+
+func gwToJoinPortName(nodeName string) string {
+	return nodeName + "-to-join"
 }

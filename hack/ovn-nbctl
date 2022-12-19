@@ -1,2 +1,2 @@
 #!/bin/bash -e
-kubectl exec $(hack/control-plane) -c nb-ovsdb -- ovn-nbctl $@
+kubectl exec -n ovn-kubernetes $(hack/control-plane) -c nb-ovsdb -- ovn-nbctl $@

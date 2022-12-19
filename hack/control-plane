@@ -1,2 +1,2 @@
 #!/bin/bash -e 
-kubectl get pod -l app=ovn-kubevirt-control-plane --no-headers -o "name"
+kubectl get pod -n ovn-kubernetes -l name=ovnkube-db --no-headers -o "name"

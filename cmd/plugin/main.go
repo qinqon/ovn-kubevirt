@@ -34,6 +34,7 @@ import (
 	"github.com/ovn-org/libovsdb/model"
 	"github.com/ovn-org/libovsdb/ovsdb"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -48,6 +49,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdbops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
+	ovnktypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
@@ -130,6 +132,7 @@ func parseConfig(stdin []byte) (*PluginConf, error) {
 
 // cmdAdd is called for ADD requests
 func cmdAdd(args *skel.CmdArgs) error {
+	logCall("FOO", args)
 	logCall("ADD", args)
 	ctx, err := loadCmdContext(args)
 	if err != nil {
@@ -151,41 +154,44 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("%s: %v", output, err)
 	}
 
-	wNodes, err := workerNodes(ctx)
-	if err != nil {
-		return err
-	}
+	/*
+		wNodes, err := workerNodes(ctx)
+		if err != nil {
+			return err
+		}
+	*/
 
 	ctx.joinRouter = newJoinRouter()
 	ctx.joinRouter.addTenantPort(ctx)
+	/*
+		ctx.gateway = &Gateway{routers: map[string]*GatewayRouter{}}
+		for i, wNode := range wNodes {
+			joinGwPort := ctx.joinRouter.addGatewayPort(ctx, i, &wNode)
 
-	ctx.gateway = &Gateway{routers: map[string]*GatewayRouter{}}
-	for i, wNode := range wNodes {
-		joinGwPort := ctx.joinRouter.addGatewayPort(ctx, i, &wNode)
+			gwRouter := GatewayRouter{
+				lr: &nbdb.LogicalRouter{
+					Name:    wNode.Name,
+					Enabled: &enabled,
+				},
+			}
 
-		gwRouter := GatewayRouter{
-			lr: &nbdb.LogicalRouter{
-				Name:    wNode.Name,
-				Enabled: &enabled,
-			},
+			ctx.gateway.routers[gwRouter.lr.Name] = &gwRouter
+
+			gwRouter.setNodePort(ctx, i, &wNode)
+			gwRouter.setJoinPort(ctx, i, &wNode)
+
+			joinGwPort.Peer = &gwRouter.joinPort.Name
+			gwRouter.joinPort.Peer = &joinGwPort.Name
 		}
-
-		ctx.gateway.routers[gwRouter.lr.Name] = &gwRouter
-
-		gwRouter.setNodePort(ctx, i, &wNode)
-		gwRouter.setJoinPort(ctx, i, &wNode)
-
-		joinGwPort.Peer = &gwRouter.joinPort.Name
-		gwRouter.joinPort.Peer = &joinGwPort.Name
-	}
-
+	*/
 	if err := ctx.joinRouter.ensure(ctx); err != nil {
 		return fmt.Errorf("failed ensuring join router: %v", err)
 	}
-
-	if err := ctx.gateway.ensure(ctx); err != nil {
-		return fmt.Errorf("failed ensuring gateway: %v", err)
-	}
+	/*
+		if err := ctx.gateway.ensure(ctx); err != nil {
+			return fmt.Errorf("failed ensuring gateway: %v", err)
+		}
+	*/
 
 	ls := nbdb.LogicalSwitch{
 		Name: ctx.conf.Name,
@@ -228,7 +234,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			Dhcpv4Options: &dhcpOptions.UUID,
 		},
 		&nbdb.LogicalSwitchPort{
-			Name:      "rt-" + ctx.conf.Name,
+			Name:      ctx.conf.Name + "-to-ovn_cluster_router",
 			Type:      "router",
 			Addresses: []string{"router"},
 			Enabled:   &enabled,
@@ -241,45 +247,49 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	joinLS := nbdb.LogicalSwitch{
-		Name: "join",
-	}
-	joinLSPs := []*nbdb.LogicalSwitchPort{
-		&nbdb.LogicalSwitchPort{
-			Name:      "ln-join",
-			Type:      "localnet",
-			Addresses: []string{"unknown"},
-			Enabled:   &enabled,
-			Options: map[string]string{
-				"network_name": ctx.conf.NetworkName,
+	/*
+		joinLS := nbdb.LogicalSwitch{
+			Name: "join",
+		}
+		joinLSPs := []*nbdb.LogicalSwitchPort{
+			&nbdb.LogicalSwitchPort{
+				Name:      "ln-join",
+				Type:      "localnet",
+				Addresses: []string{"unknown"},
+				Enabled:   &enabled,
+				Options: map[string]string{
+					"network_name": ctx.conf.NetworkName,
+				},
 			},
-		},
-	}
+		}
 
-	for _, gwRouter := range ctx.gateway.routers {
-		joinLSPs = append(joinLSPs, &nbdb.LogicalSwitchPort{
-			Name:      "rt-" + gwRouter.lr.Name,
-			Type:      "router",
-			Addresses: []string{"router"},
-			Enabled:   &enabled,
-			Options: map[string]string{
-				"router-port": gwRouter.lr.Name,
-			},
-		})
-	}
-	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.nbcli, &joinLS, joinLSPs...); err != nil {
+		for _, gwRouter := range ctx.gateway.routers {
+			joinLSPs = append(joinLSPs, &nbdb.LogicalSwitchPort{
+				Name:      "rt-" + gwRouter.lr.Name,
+				Type:      "router",
+				Addresses: []string{"router"},
+				Enabled:   &enabled,
+				Options: map[string]string{
+					"router-port": gwRouter.lr.Name,
+				},
+			})
+		}
+		if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.nbcli, &joinLS, joinLSPs...); err != nil {
+			return err
+		}
+
+	*/
+	if err := masqueradeTenantSubnet(ctx); err != nil {
 		return err
 	}
+	/*
 
-	if err := ctx.gateway.masqueradeTenantSubnet(ctx, lsps[0]); err != nil {
-		return err
-	}
+		if err := ctx.gateway.routeAllIPsToNode(ctx); err != nil {
+			return err
+		}
+	*/
 
-	if err := ctx.gateway.routeAllIPsToNode(ctx); err != nil {
-		return err
-	}
-
-	if err := ctx.gateway.routeTenantSubnetToJoinRouter(ctx); err != nil {
+	if err := routeTenantSubnetToJoinRouter(ctx); err != nil {
 		return err
 	}
 
@@ -292,6 +302,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 // cmdDel is called for DELETE requests
 func cmdDel(args *skel.CmdArgs) error {
+	return nil
 	logCall("DEL", args)
 	ctx, err := loadCmdContext(args)
 	if err != nil {
@@ -328,26 +339,42 @@ func main() {
 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("OVN kubevirt"))
 }
 
-func newNBClient() (ovsclient.Client, error) {
+func newNBClient(ctx *CmdContext) (ovsclient.Client, error) {
 	ovsNbModel, err := nbdb.FullDatabaseModel()
 	if err != nil {
 		return nil, err
 	}
 
-	return newOVSClient(ovsNbModel, "6641")
+	return newOVSClient(ctx, ovsNbModel, "6641")
 }
 
-func newSBClient() (ovsclient.Client, error) {
+func newSBClient(ctx *CmdContext) (ovsclient.Client, error) {
 	ovsSbModel, err := sbdb.FullDatabaseModel()
 	if err != nil {
 		return nil, err
 	}
 
-	return newOVSClient(ovsSbModel, "6642")
+	return newOVSClient(ctx, ovsSbModel, "6642")
 }
 
-func newOVSClient(ovsModel model.ClientDBModel, port string) (ovsclient.Client, error) {
-	cli, err := ovsclient.NewOVSDBClient(ovsModel, ovsclient.WithEndpoint("tcp:ovn-kubevirt-control-plane:"+port))
+func newOVSClient(ctx *CmdContext, ovsModel model.ClientDBModel, port string) (ovsclient.Client, error) {
+	endpointSliceList := &discoveryv1.EndpointSliceList{}
+	if err := ctx.k8scli.List(context.Background(), endpointSliceList,
+		client.InNamespace("ovn-kubernetes"),
+		client.MatchingLabels(map[string]string{"kubernetes.io/service-name": "ovnkube-db"})); err != nil {
+		return nil, err
+	}
+	if len(endpointSliceList.Items) == 0 {
+		return nil, fmt.Errorf("missing ovnkube-db endpoint slice")
+	}
+	if len(endpointSliceList.Items[0].Endpoints) == 0 {
+		return nil, fmt.Errorf("missing ovnkube-db endpoint")
+	}
+	if len(endpointSliceList.Items[0].Endpoints[0].Addresses) == 0 {
+		return nil, fmt.Errorf("missing ovnkube-db address")
+	}
+	endpoint := fmt.Sprintf("tcp:%s:%s", endpointSliceList.Items[0].Endpoints[0].Addresses[0], port)
+	cli, err := ovsclient.NewOVSDBClient(ovsModel, ovsclient.WithEndpoint(endpoint))
 
 	err = cli.Connect(context.Background())
 	if err != nil {
@@ -397,14 +424,14 @@ func parseArgs(envArgsString string) (*ExtraArgs, error) {
 func runOVSVsctl(ctx *CmdContext, args ...string) (string, error) {
 	kubeconfigEnv := []string{"KUBECONFIG=/etc/cni/net.d/ovn-kubevirt-kubeconfig"}
 	//TODO: Use k8s clientset
-	cmd := exec.Command("kubectl", "get", "pod", "-l", "app=ovn-kubevirt-node", "--no-headers", "-o", "name", "--field-selector", fmt.Sprintf("spec.nodeName=%s", ctx.hostname))
+	cmd := exec.Command("kubectl", "get", "pod", "-n", "ovn-kubernetes", "-l", "app=ovs-node", "--no-headers", "-o", "name", "--field-selector", fmt.Sprintf("spec.nodeName=%s", ctx.hostname))
 	cmd.Env = kubeconfigEnv
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s: %v", output, err)
 	}
 	podName := strings.TrimSuffix(string(output), "\n")
-	cmd = exec.Command("kubectl", append([]string{"exec", podName, "-c", "ovs-server", "--", "ovs-vsctl"}, args...)...)
+	cmd = exec.Command("kubectl", append([]string{"exec", podName, "-n", "ovn-kubernetes", "-c", "ovs-daemons", "--", "ovs-vsctl"}, args...)...)
 	cmd.Env = kubeconfigEnv
 	output, err = cmd.CombinedOutput()
 	if err != nil {
@@ -426,12 +453,12 @@ func loadCmdContext(args *skel.CmdArgs) (*CmdContext, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx.nbcli, err = newNBClient()
+	ctx.nbcli, err = newNBClient(&ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx.sbcli, err = newSBClient()
+	ctx.sbcli, err = newSBClient(&ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -580,16 +607,59 @@ func (g *GatewayRouter) ensure(ctx *CmdContext) error {
 	return nil
 }
 
+// NOTE: To route from the VM ip to the proper gw router we cannot use a static route
+// of type src-ip [VM IP -> gw router ip] since it has higher priority than the
+// router ports subnet, so we need to implement it with policies
 func (j *JoinRouter) routeDynamicAddressToGw(ctx *CmdContext, lsp *nbdb.LogicalSwitchPort) error {
 
-	// Post routing Masquerade: VM IP -> hypervisor LRP por IP
-	currentGwRouter, ok := ctx.gateway.routers[ctx.hostname]
-	if !ok {
-		return fmt.Errorf("gw router %s not found", ctx.hostname)
+	// Add a dummy route to match the tenant cluster so we can continue implementing
+	// routing with policies (if there is no match policies are not run).
+	dummyRoute := nbdb.LogicalRouterStaticRoute{
+		IPPrefix: ctx.conf.Subnet,
+		Nexthop:  ctx.conf.Router,
+		Policy:   &nbdb.LogicalRouterStaticRoutePolicySrcIP,
 	}
-	currentGwLRPIP, _, err := net.ParseCIDR(currentGwRouter.joinPort.Networks[0])
+
+	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+		return item.Policy != nil && *item.Policy == *dummyRoute.Policy && item.Nexthop == dummyRoute.Nexthop && item.IPPrefix == dummyRoute.IPPrefix
+	}
+	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, j.lr.Name, &dummyRoute, p); err != nil {
+		return err
+	}
+
+	// Add a allow policy with higher priority to keep nexthop for e/s traffic
+	// TODO: Read the internal subnets from the system
+	podCIDR := "10.244.0.0/16"
+	internalCIDR := "100.64.0.0/16"
+	keepInternalIPsNexthop := nbdb.LogicalRouterPolicy{
+		Match:    fmt.Sprintf("ip4.src == %s && ip4.dst == { %s, %s }", ctx.conf.Subnet, podCIDR, internalCIDR),
+		Action:   nbdb.LogicalRouterPolicyActionAllow,
+		Priority: 2,
+	}
+
+	policyPredicate := func(item *nbdb.LogicalRouterPolicy) bool {
+		return item.Priority == keepInternalIPsNexthop.Priority && item.Match == keepInternalIPsNexthop.Match && item.Action == keepInternalIPsNexthop.Action
+	}
+
+	if err := libovsdbops.CreateOrUpdateLogicalRouterPolicyWithPredicate(ctx.nbcli, j.lr.Name, &keepInternalIPsNexthop, policyPredicate); err != nil {
+		return err
+	}
+
+	nodeLRP := &nbdb.LogicalRouterPort{
+		Name: ovnktypes.GWRouterToJoinSwitchPrefix + ovnktypes.GWRouterPrefix + ctx.hostname,
+	}
+
+	nodeLRP, err := libovsdbops.GetLogicalRouterPort(ctx.nbcli, nodeLRP)
 	if err != nil {
 		return err
+	}
+	nodeLRPIP, _, err := net.ParseCIDR(nodeLRP.Networks[0])
+	if err != nil {
+		return err
+	}
+	nodeGwAddress := nodeLRPIP.String()
+	if nodeGwAddress == "" {
+		return fmt.Errorf("missing node gw router port address")
 	}
 
 	// We need to read the lsp again to get the assigned address
@@ -602,18 +672,22 @@ func (j *JoinRouter) routeDynamicAddressToGw(ctx *CmdContext, lsp *nbdb.LogicalS
 		return fmt.Errorf("missing dynamic addresses at lsp %s", lsp.Name)
 	}
 
-	address := strings.Split(*lsp.DynamicAddresses, " ")[1]
-	route := nbdb.LogicalRouterStaticRoute{
-		IPPrefix:   address,
-		Nexthop:    currentGwLRPIP.String(),
-		OutputPort: &j.gwPorts[ctx.hostname].Name,
-		Policy:     &nbdb.LogicalRouterStaticRoutePolicySrcIP,
+	vmAddress := strings.Split(*lsp.DynamicAddresses, " ")[1]
+
+	// Add a reroute policy to route VM n/s traffic to the node where the VM
+	// is running
+	routeToGw := nbdb.LogicalRouterPolicy{
+		Match:    fmt.Sprintf("ip4.src == %s", vmAddress),
+		Action:   nbdb.LogicalRouterPolicyActionReroute,
+		Nexthops: []string{nodeGwAddress},
+		Priority: 1,
 	}
 
-	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
-		return item.Policy != nil && *item.Policy == *route.Policy && item.OutputPort != nil && *item.OutputPort == *route.OutputPort && item.Nexthop == route.Nexthop && item.IPPrefix == route.IPPrefix
+	policyPredicate = func(item *nbdb.LogicalRouterPolicy) bool {
+		return item.Priority == keepInternalIPsNexthop.Priority && item.Match == keepInternalIPsNexthop.Match && item.Action == keepInternalIPsNexthop.Action && item.Nexthops != nil && item.Nexthop == routeToGw.Nexthop
 	}
-	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, j.lr.Name, &route, p); err != nil {
+
+	if err := libovsdbops.CreateOrUpdateLogicalRouterPolicyWithPredicate(ctx.nbcli, j.lr.Name, &routeToGw, policyPredicate); err != nil {
 		return err
 	}
 
@@ -641,37 +715,61 @@ func (g *Gateway) routeAllIPsToNode(ctx *CmdContext) error {
 	return nil
 }
 
-func (g *Gateway) masqueradeTenantSubnet(ctx *CmdContext, lsp *nbdb.LogicalSwitchPort) error {
-	currentGwRouter, ok := g.routers[ctx.hostname]
-	if !ok {
-		return fmt.Errorf("gw router %s not found", ctx.hostname)
+func masqueradeTenantSubnet(ctx *CmdContext) error {
+	currentGwLR := &nbdb.LogicalRouter{
+		Name: ovnktypes.GWRouterPrefix + ctx.hostname,
 	}
-	currentGwLRPIP, _, err := net.ParseCIDR(currentGwRouter.gwPort.Networks[0])
+
+	currentGwLR, err := libovsdbops.GetLogicalRouter(ctx.nbcli, currentGwLR)
+	if err != nil {
+		return fmt.Errorf("failed getting current gw logical router %s: %v", currentGwLR.Name, err)
+	}
+
+	currentGwLRP := &nbdb.LogicalRouterPort{
+		Name: ovnktypes.GWRouterToExtSwitchPrefix + currentGwLR.Name,
+	}
+	if err := ctx.nbcli.Get(context.Background(), currentGwLRP); err != nil {
+		return fmt.Errorf("failed getting current gw logical router port %s: %v", currentGwLRP.Name, err)
+	}
+
+	currentGwLRPIP, _, err := net.ParseCIDR(currentGwLRP.Networks[0])
 	if err != nil {
 		return err
+	}
+
+	if err := ctx.nbcli.Get(context.Background(), currentGwLR); err != nil {
+		return fmt.Errorf("failed getting current gw logical router %s: %v", currentGwLR.Name, err)
 	}
 
 	masqueradeNAT := &nbdb.NAT{
 		ExternalIP: currentGwLRPIP.String(),
 		LogicalIP:  ctx.conf.Subnet,
 		Type:       nbdb.NATTypeSNAT,
+		Options: map[string]string{
+			"stateless": "false",
+		},
 	}
-	if err := libovsdbops.CreateOrUpdateNATs(ctx.nbcli, currentGwRouter.lr, masqueradeNAT); err != nil {
+	if err := libovsdbops.CreateOrUpdateNATs(ctx.nbcli, currentGwLR, masqueradeNAT); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (g *Gateway) routeTenantSubnetToJoinRouter(ctx *CmdContext) error {
-
-	joinGwPort, ok := ctx.joinRouter.gwPorts[ctx.hostname]
-	if !ok {
-		fmt.Errorf("missing gw port for host %s at join lr", ctx.hostname)
+func routeTenantSubnetToJoinRouter(ctx *CmdContext) error {
+	joinGwPort := &nbdb.LogicalRouterPort{
+		Name: ovnktypes.GWRouterToJoinSwitchPrefix + ovnktypes.OVNClusterRouter,
 	}
+
+	joinGwPort, err := libovsdbops.GetLogicalRouterPort(ctx.nbcli, joinGwPort)
+	if err != nil {
+		return fmt.Errorf("failed getting current join logical router port %s: %v", joinGwPort.Name, err)
+	}
+
 	joinGwPortIP, _, err := net.ParseCIDR(joinGwPort.Networks[0])
 	if err != nil {
 		return err
 	}
+
 	tenantSubnetRoute := nbdb.LogicalRouterStaticRoute{
 		IPPrefix: ctx.conf.Subnet,
 		Nexthop:  joinGwPortIP.String(),
@@ -680,7 +778,7 @@ func (g *Gateway) routeTenantSubnetToJoinRouter(ctx *CmdContext) error {
 	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
 		return item.Nexthop == tenantSubnetRoute.Nexthop && item.IPPrefix == tenantSubnetRoute.IPPrefix
 	}
-	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, ctx.hostname, &tenantSubnetRoute, p); err != nil {
+	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, ovnktypes.GWRouterPrefix+ctx.hostname, &tenantSubnetRoute, p); err != nil {
 		return err
 	}
 
@@ -699,7 +797,7 @@ func (g *Gateway) ensure(ctx *CmdContext) error {
 func newJoinRouter() *JoinRouter {
 	return &JoinRouter{
 		lr: &nbdb.LogicalRouter{
-			Name:    "join",
+			Name:    ovnktypes.OVNClusterRouter,
 			Enabled: &enabled,
 		},
 		tenantPorts: map[string]*nbdb.LogicalRouterPort{},

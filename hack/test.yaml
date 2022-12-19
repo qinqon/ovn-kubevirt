@@ -24,7 +24,7 @@ spec:
             "exclude-ips": "10.0.0.1..10.0.0.10",
             "router": "10.0.0.1",
             "lease-time": "3600",
-            "network-name": "physnet1"
+            "network-name": "physnet"
           }
     ]
     }
@@ -35,6 +35,8 @@ metadata:
   namespace: cluster1
   name: worker1
 spec:
+  nodeSelector:
+    kubernetes.io/hostname: ovn-kubevirt-worker
   domain:
     devices:
       disks:
@@ -80,6 +82,8 @@ metadata:
   namespace: cluster1
   name: worker2
 spec:
+  nodeSelector:
+    kubernetes.io/hostname: ovn-kubevirt-worker2
   domain:
     devices:
       disks:

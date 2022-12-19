@@ -1,4 +1,4 @@
 #!/bin/bash -e
 node_name=$1
 shift
-kubectl exec $(hack/node $node_name) -c ovs-server -- ovs-vsctl $@
+kubectl exec -n ovn-kubernetes $(hack/node $node_name) -c ovs-daemons -- ovs-vsctl $@

@@ -30,5 +30,13 @@ plugin:
 
 sync: delete apply
 
+capk:
+	hack/kind.sh install-capi
+	hack/kind.sh install-capk
+	hack/kind.sh wait-capk
+	
+capk-cluster: capk
+	hack/kind.sh create-capk-cluster
+
 logs:
 	kubectl logs -l app=ovn-kubevirt --all-containers --tail=100000

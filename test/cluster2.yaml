@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cluster2
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  namespace: cluster2
+  name: ovn
+spec:
+  config: >
+    {
+        "cniVersion": "0.4.0",
+        "name": "cluster2",
+        "netAttachDefName": "cluster2/ovn",
+        "topology": "layer3",
+        "type": "ovn-k8s-cni-overlay",
+        "subnets": "10.128.2.0/24",
+        "dhcp": true,
+        "logFile": "/var/log/ovn-kubernetes/ovn-k8s-cni-overlay.log",
+        "logLevel": "5",
+        "logfile-maxsize": 100,
+        "logfile-maxbackups": 5,
+        "logfile-maxage": 5
+
+    }
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  labels:
+    kubevirt.io/vm: worker1
+  namespace: cluster2
+  name: worker1
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: worker1
+    spec: 
+      domain:
+        devices:
+          disks:
+          - disk:
+              bus: virtio
+            name: containerdisk
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+          interfaces:
+          - bridge: {}
+            name: multus
+        resources:
+          requests:
+            memory: 128Mi
+      networks:
+      - name: multus
+        multus:
+          networkName: ovn
+      terminationGracePeriodSeconds: 0
+      volumes:
+      - containerDisk:
+          image: quay.io/kubevirtci/alpine-with-test-tooling-container-disk:2211290730-4eb880c
+        name: containerdisk
+      - cloudInitNoCloud:
+          networkData: |
+            version: 2
+            ethernets:
+              eth0:
+                dhcp4: true
+          userData: |-
+            #cloud-config
+            password: fedora
+            chpasswd: { expire: False }
+            runcmd:
+              - ip l set up dev lo
+        name: cloudinitdisk

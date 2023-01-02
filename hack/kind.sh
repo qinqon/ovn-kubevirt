@@ -35,7 +35,7 @@ function wait-kubevirt() {
 
 function install-calico() {
     kubectl create -f  https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/calico.yaml
-    kubectl rollout status ds/calico-node -n kube-system --timeout=2m
+    kubectl rollout status ds/calico-node -n kube-system --timeout=5m
 }
 
 function install-network-manager() {
@@ -64,7 +64,7 @@ EOF
 }
 
 function wait-network-operators() {
-    kubectl wait networkaddonsconfig cluster --for condition=Available --timeout=2m
+    kubectl wait networkaddonsconfig cluster --for condition=Available --timeout=5m
 }
 
 function install-kubernetes-nmstate() {
@@ -176,60 +176,8 @@ function install-cnv() {
 }
 
 function start-kind() {
-    if kind get clusters | grep "${KIND_CLUSTER_NAME}"; then
-      kind delete cluster --name "${KIND_CLUSTER_NAME}"
-    fi
-
-    # create registry container unless it already exists
-    reg_name='kind-registry'
-    reg_port='5001'
-    if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != 'true' ]; then
-      docker run \
-        -d --restart=always -p "127.0.0.1:${reg_port}:5000" --name "${reg_name}" \
-        registry:2
-    fi
-
-    cat <<EOF | kind create cluster --name "${KIND_CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}" --image "${KIND_IMAGE}" --config=- --retain
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-networking:
-# the default CNI will not be installed
-#  disableDefaultCNI: true
-nodes:
-- role: control-plane
-- role: worker
-- role: worker
-containerdConfigPatches:
-- |-
-  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:${reg_port}"]
-    endpoint = ["http://${reg_name}:5000"]
-EOF
-    
-    # connect the registry to the cluster network if not already connected
-    if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "${reg_name}")" = 'null' ]; then
-      docker network connect "kind" "${reg_name}"
-    fi
-
-    # Document the local registry
-    # https://github.com/kubernetes/enhancements/tree/master/keps/sig-cluster-lifecycle/generic/1755-communicating-a-local-registry
-    cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: local-registry-hosting
-  namespace: kube-public
-data:
-  localRegistryHosting.v1: |
-    host: "localhost:${reg_port}"
-    help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
-EOF
-
-}
-
-
-function start-kind-ovn() {
-    if [ ! -d ovn-kubernetes ]; then 
-        git clone https://github.com/ovn-org/ovn-kubernetes
+    if ! ls ovn-kubernetes ; then 
+        git clone https://github.com/qinqon/ovn-kubernetes -b ovn-kubevirt
     fi
     pushd ovn-kubernetes
         #pushd go-controller
@@ -246,10 +194,14 @@ function start-kind-ovn() {
     popd 
 }
 
+function deploy() {
+    pushd ovn-kubernetes/contrib
+        ./kind.sh --cluster-name ovn-kubevirt --deploy
+    popd
+}
 
 function run() {
-    start-kind-ovn
-
+    start-kind
     for node in $(kubectl get node --no-headers  -o custom-columns=":metadata.name"); do   
         docker exec -t $node bash -c "echo 'fs.inotify.max_user_watches=1048576' >> /etc/sysctl.conf"
         docker exec -t $node bash -c "echo 'fs.inotify.max_user_instances=512' >> /etc/sysctl.conf"

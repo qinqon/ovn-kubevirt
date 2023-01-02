@@ -70,11 +70,10 @@ func init() {
 
 type PluginConf struct {
 	types.NetConf
-	Router      string `json:"router"`
-	LeaseTime   string `json:"lease-time"`
-	Subnet      string `json:"subnet"`
-	ExcludeIps  string `json:"exclude-ips"`
-	NetworkName string `json:"network-name"`
+	Router     string `json:"router"`
+	LeaseTime  string `json:"lease-time"`
+	Subnet     string `json:"subnet"`
+	ExcludeIps string `json:"exclude-ips"`
 }
 
 type ExtraArgs struct {
@@ -154,45 +153,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("%s: %v", output, err)
 	}
 
-	/*
-		wNodes, err := workerNodes(ctx)
-		if err != nil {
-			return err
-		}
-	*/
-
 	ctx.joinRouter = newJoinRouter()
 	ctx.joinRouter.addTenantPort(ctx)
-	/*
-		ctx.gateway = &Gateway{routers: map[string]*GatewayRouter{}}
-		for i, wNode := range wNodes {
-			joinGwPort := ctx.joinRouter.addGatewayPort(ctx, i, &wNode)
 
-			gwRouter := GatewayRouter{
-				lr: &nbdb.LogicalRouter{
-					Name:    wNode.Name,
-					Enabled: &enabled,
-				},
-			}
-
-			ctx.gateway.routers[gwRouter.lr.Name] = &gwRouter
-
-			gwRouter.setNodePort(ctx, i, &wNode)
-			gwRouter.setJoinPort(ctx, i, &wNode)
-
-			joinGwPort.Peer = &gwRouter.joinPort.Name
-			gwRouter.joinPort.Peer = &joinGwPort.Name
-		}
-	*/
 	if err := ctx.joinRouter.ensure(ctx); err != nil {
 		return fmt.Errorf("failed ensuring join router: %v", err)
 	}
-	/*
-		if err := ctx.gateway.ensure(ctx); err != nil {
-			return fmt.Errorf("failed ensuring gateway: %v", err)
-		}
-	*/
-
 	ls := nbdb.LogicalSwitch{
 		Name: ctx.conf.Name,
 		OtherConfig: map[string]string{
@@ -244,50 +210,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 		},
 	}
 	if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.nbcli, &ls, lsps...); err != nil {
-		return err
+		return fmt.Errorf("failed ensuring tenant logical switch and ports: %v", err)
 	}
 
-	/*
-		joinLS := nbdb.LogicalSwitch{
-			Name: "join",
-		}
-		joinLSPs := []*nbdb.LogicalSwitchPort{
-			&nbdb.LogicalSwitchPort{
-				Name:      "ln-join",
-				Type:      "localnet",
-				Addresses: []string{"unknown"},
-				Enabled:   &enabled,
-				Options: map[string]string{
-					"network_name": ctx.conf.NetworkName,
-				},
-			},
-		}
-
-		for _, gwRouter := range ctx.gateway.routers {
-			joinLSPs = append(joinLSPs, &nbdb.LogicalSwitchPort{
-				Name:      "rt-" + gwRouter.lr.Name,
-				Type:      "router",
-				Addresses: []string{"router"},
-				Enabled:   &enabled,
-				Options: map[string]string{
-					"router-port": gwRouter.lr.Name,
-				},
-			})
-		}
-		if err := libovsdbops.CreateOrUpdateLogicalSwitchPortsAndSwitch(ctx.nbcli, &joinLS, joinLSPs...); err != nil {
-			return err
-		}
-
-	*/
 	if err := masqueradeTenantSubnet(ctx); err != nil {
 		return err
 	}
-	/*
-
-		if err := ctx.gateway.routeAllIPsToNode(ctx); err != nil {
-			return err
-		}
-	*/
 
 	if err := routeTenantSubnetToJoinRouter(ctx); err != nil {
 		return err
@@ -563,54 +491,35 @@ func nodeIP(ctx *CmdContext, nodeName string) (string, error) {
 	return node.Status.Addresses[0].Address, nil
 }
 
-func workerNodes(ctx *CmdContext) ([]corev1.Node, error) {
+func nodes(ctx *CmdContext) ([]corev1.Node, error) {
 	nodeList := &corev1.NodeList{}
-	if err := ctx.k8scli.List(context.Background(), nodeList, client.HasLabels([]string{"node-role.kubernetes.io/worker"})); err != nil {
+	if err := ctx.k8scli.List(context.Background(), nodeList); err != nil {
 		return nil, err
 	}
 	return nodeList.Items, nil
 
 }
 
-func (g *GatewayRouter) ensure(ctx *CmdContext) error {
-	if err := libovsdbops.CreateOrUpdateLogicalRouter(ctx.nbcli, g.lr); err != nil {
+// of type src-ip [VM IP -> gw router ip] since it has higher priority than the
+// router ports subnet, so we need to implement it with policies
+func (j *JoinRouter) routeDynamicAddressToGw(ctx *CmdContext, lsp *nbdb.LogicalSwitchPort) error {
+
+	if err := j.ensureDummyRoute(ctx); err != nil {
 		return err
 	}
 
-	if err := libovsdbops.CreateOrUpdateLogicalRouterPorts(ctx.nbcli, g.lr, []*nbdb.LogicalRouterPort{g.gwPort, g.joinPort}); err != nil {
+	if err := j.ensureKeepInternalTrafficNextHopPolicy(ctx); err != nil {
 		return err
-	}
-	chassisList, err := libovsdbops.ListChassis(ctx.sbcli)
-	if err != nil {
-		return err
-	}
-	var selectedChassis *sbdb.Chassis
-	for _, chassis := range chassisList {
-		if chassis.Hostname == g.gwPort.Name {
-			selectedChassis = chassis
-			break
-		}
-	}
-	if selectedChassis == nil {
-		return fmt.Errorf("%s chassis not found", g.lr.Name)
 	}
 
-	gatewayChassis := &nbdb.GatewayChassis{
-		Name:        selectedChassis.Hostname,
-		ChassisName: selectedChassis.Name,
-		Priority:    20,
-	}
-	if err := libovsdbops.CreateOrUpdateGatewayChassis(ctx.nbcli, g.gwPort, gatewayChassis); err != nil {
+	if err := j.ensureRerouteToGwPolicy(ctx, lsp); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// NOTE: To route from the VM ip to the proper gw router we cannot use a static route
-// of type src-ip [VM IP -> gw router ip] since it has higher priority than the
-// router ports subnet, so we need to implement it with policies
-func (j *JoinRouter) routeDynamicAddressToGw(ctx *CmdContext, lsp *nbdb.LogicalSwitchPort) error {
+func (j *JoinRouter) ensureDummyRoute(ctx *CmdContext) error {
 
 	// Add a dummy route to match the tenant cluster so we can continue implementing
 	// routing with policies (if there is no match policies are not run).
@@ -624,27 +533,33 @@ func (j *JoinRouter) routeDynamicAddressToGw(ctx *CmdContext, lsp *nbdb.LogicalS
 		return item.Policy != nil && *item.Policy == *dummyRoute.Policy && item.Nexthop == dummyRoute.Nexthop && item.IPPrefix == dummyRoute.IPPrefix
 	}
 	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, j.lr.Name, &dummyRoute, p); err != nil {
-		return err
+		return fmt.Errorf("failed ensuring dummy route: %v", err)
 	}
+	return nil
+}
 
+func (j *JoinRouter) ensureKeepInternalTrafficNextHopPolicy(ctx *CmdContext) error {
 	// Add a allow policy with higher priority to keep nexthop for e/s traffic
 	// TODO: Read the internal subnets from the system
 	podCIDR := "10.244.0.0/16"
 	internalCIDR := "100.64.0.0/16"
-	keepInternalIPsNexthop := nbdb.LogicalRouterPolicy{
+	policy := nbdb.LogicalRouterPolicy{
 		Match:    fmt.Sprintf("ip4.src == %s && ip4.dst == { %s, %s }", ctx.conf.Subnet, podCIDR, internalCIDR),
 		Action:   nbdb.LogicalRouterPolicyActionAllow,
 		Priority: 2,
 	}
 
-	policyPredicate := func(item *nbdb.LogicalRouterPolicy) bool {
-		return item.Priority == keepInternalIPsNexthop.Priority && item.Match == keepInternalIPsNexthop.Match && item.Action == keepInternalIPsNexthop.Action
+	predicate := func(item *nbdb.LogicalRouterPolicy) bool {
+		return item.Priority == policy.Priority && item.Match == policy.Match && item.Action == policy.Action
 	}
 
-	if err := libovsdbops.CreateOrUpdateLogicalRouterPolicyWithPredicate(ctx.nbcli, j.lr.Name, &keepInternalIPsNexthop, policyPredicate); err != nil {
-		return err
+	if err := libovsdbops.CreateOrUpdateLogicalRouterPolicyWithPredicate(ctx.nbcli, j.lr.Name, &policy, predicate); err != nil {
+		return fmt.Errorf("failed ensuring policy at cluster router to keep e/w nexthop: %v", err)
 	}
+	return nil
+}
 
+func (j *JoinRouter) ensureRerouteToGwPolicy(ctx *CmdContext, lsp *nbdb.LogicalSwitchPort) error {
 	nodeLRP := &nbdb.LogicalRouterPort{
 		Name: ovnktypes.GWRouterToJoinSwitchPrefix + ovnktypes.GWRouterPrefix + ctx.hostname,
 	}
@@ -676,42 +591,20 @@ func (j *JoinRouter) routeDynamicAddressToGw(ctx *CmdContext, lsp *nbdb.LogicalS
 
 	// Add a reroute policy to route VM n/s traffic to the node where the VM
 	// is running
-	routeToGw := nbdb.LogicalRouterPolicy{
+	policy := nbdb.LogicalRouterPolicy{
 		Match:    fmt.Sprintf("ip4.src == %s", vmAddress),
 		Action:   nbdb.LogicalRouterPolicyActionReroute,
 		Nexthops: []string{nodeGwAddress},
 		Priority: 1,
 	}
 
-	policyPredicate = func(item *nbdb.LogicalRouterPolicy) bool {
-		return item.Priority == keepInternalIPsNexthop.Priority && item.Match == keepInternalIPsNexthop.Match && item.Action == keepInternalIPsNexthop.Action && item.Nexthops != nil && item.Nexthop == routeToGw.Nexthop
+	predicate := func(item *nbdb.LogicalRouterPolicy) bool {
+		return item.Priority == policy.Priority && item.Match == policy.Match && item.Action == policy.Action && item.Nexthops != nil && item.Nexthop == policy.Nexthop
 	}
 
-	if err := libovsdbops.CreateOrUpdateLogicalRouterPolicyWithPredicate(ctx.nbcli, j.lr.Name, &routeToGw, policyPredicate); err != nil {
-		return err
+	if err := libovsdbops.CreateOrUpdateLogicalRouterPolicyWithPredicate(ctx.nbcli, j.lr.Name, &policy, predicate); err != nil {
+		return fmt.Errorf("failed ensuring policy to reroute to n/s traffic: %v", err)
 	}
-
-	return nil
-}
-
-func (g *Gateway) routeAllIPsToNode(ctx *CmdContext) error {
-	currentNodeIP, err := nodeIP(ctx, ctx.hostname)
-	if err != nil {
-		return err
-	}
-
-	defaultGwRoute := nbdb.LogicalRouterStaticRoute{
-		IPPrefix: "0.0.0.0/0",
-		Nexthop:  currentNodeIP,
-	}
-
-	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
-		return item.Nexthop == defaultGwRoute.Nexthop && item.IPPrefix == defaultGwRoute.IPPrefix
-	}
-	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, ctx.hostname, &defaultGwRoute, p); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -750,7 +643,7 @@ func masqueradeTenantSubnet(ctx *CmdContext) error {
 		},
 	}
 	if err := libovsdbops.CreateOrUpdateNATs(ctx.nbcli, currentGwLR, masqueradeNAT); err != nil {
-		return err
+		return fmt.Errorf("failed ensuring tenant subnet masquerade: %s")
 	}
 	return nil
 }
@@ -770,27 +663,26 @@ func routeTenantSubnetToJoinRouter(ctx *CmdContext) error {
 		return err
 	}
 
-	tenantSubnetRoute := nbdb.LogicalRouterStaticRoute{
+	route := nbdb.LogicalRouterStaticRoute{
 		IPPrefix: ctx.conf.Subnet,
 		Nexthop:  joinGwPortIP.String(),
 	}
 
-	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
-		return item.Nexthop == tenantSubnetRoute.Nexthop && item.IPPrefix == tenantSubnetRoute.IPPrefix
+	predicate := func(item *nbdb.LogicalRouterStaticRoute) bool {
+		return item.Nexthop == route.Nexthop && item.IPPrefix == route.IPPrefix
 	}
-	if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, ovnktypes.GWRouterPrefix+ctx.hostname, &tenantSubnetRoute, p); err != nil {
+
+	nodes, err := nodes(ctx)
+	if err != nil {
 		return err
 	}
 
-	return nil
-}
-
-func (g *Gateway) ensure(ctx *CmdContext) error {
-	for _, gr := range g.routers {
-		if err := gr.ensure(ctx); err != nil {
-			return err
+	for _, node := range nodes {
+		if err := libovsdbops.CreateOrUpdateLogicalRouterStaticRoutesWithPredicate(ctx.nbcli, ovnktypes.GWRouterPrefix+node.Name, &route, predicate); err != nil {
+			return fmt.Errorf("failed ensuring route to join router at gw: %v", err)
 		}
 	}
+
 	return nil
 }
 

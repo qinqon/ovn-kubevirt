@@ -7,21 +7,19 @@ set -euxo pipefail
 
 ROOT_DIR=${DIR}/../
 OUTPUT_DIR=${ROOT_DIR}/.out
-CNI_DIR=/opt/cni/bin
 PLUGIN_NAME=ovn-kubevirt
 KIND_CLUSTER_NAME=ovn-kubevirt
-KIND_IMAGE=${KIND_IMAGE:-kindest/node:v1.24.7@sha256:577c630ce8e509131eab1aea12c022190978dd2f745aac5eb1fe65c0807eb315}
-CALICO_VERSION=${CALICO_VERSION:-v3.24.5}
-CNAO_VERSION=${CNAO_VERSION:-v0.78.0}
 KIND_CONFIG=${KIND_CONFIG:-${DIR}/kind-config.yaml}
 KUBERNETES_NMSTATE_VERSION=${KUBERNETES_NMSTATE_VERSION:-v0.74.0}
+export KUBEVIRT_PROVIDER=external
 export KUBECONFIG=$OUTPUT_DIR/kubeconfig
-export K8S_VERSION=${K8S_VERSION:-v1.24.7}
 export CAPK_RELEASE_VERSION="v0.1.0-rc.0"
+export KIND_IMAGE=${KIND_IMAGE:-quay.io/ellorent/kindest-node@sha256}
+export K8S_VERSION=${K8S_VERSION:-b79f78e961a23c05b5eb8a1c9e9a7b0d9f656ddec078e03f4ca24b1272791c52}
 
 CLUSTERCTL_PATH=$OUTPUT_DIR/clusterctl
 
-function install-kubevirt() {
+function install-kubevirt-release() {
     KV_VER=$(curl "https://api.github.com/repos/kubevirt/kubevirt/releases/latest" | jq -r ".tag_name")
 
     kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KV_VER}/kubevirt-operator.yaml"
@@ -29,62 +27,20 @@ function install-kubevirt() {
     kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KV_VER}/kubevirt-cr.yaml"
 }
 
+function install-kubevirt() {
+    if ! ls ovn-kubernetes ; then 
+        git clone https://github.com/qinqon/kubevirt -b dnm-hypershift-kubevirt
+    fi
+    pushd kubevirt
+        export FEATURE_GATES=KubevirtSeccompProfile
+        make DOCKER_PREFIX=localhost:5000/kubevirt cluster-sync
+    popd
+    sudo sysctl -w vm.unprivileged_userfaultfd=1
+    kubectl apply -f hack/allow-post-copy-migration.yaml
+}
+
 function wait-kubevirt() {
     kubectl wait -n kubevirt kv kubevirt --for=condition=Available --timeout=10m
-}
-
-function install-calico() {
-    kubectl create -f  https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/calico.yaml
-    kubectl rollout status ds/calico-node -n kube-system --timeout=5m
-}
-
-function install-network-manager() {
-    kubectl apply -f network-manager.yaml
-    kubectl rollout status ds/network-manager
-}
-
-
-function install-network-operators() {
-    kubectl apply -f https://github.com/kubevirt/cluster-network-addons-operator/releases/download/${CNAO_VERSION}/namespace.yaml
-    kubectl apply -f https://github.com/kubevirt/cluster-network-addons-operator/releases/download/${CNAO_VERSION}/network-addons-config.crd.yaml
-    kubectl apply -f https://github.com/kubevirt/cluster-network-addons-operator/releases/download/${CNAO_VERSION}/operator.yaml
-    
-    cat <<EOF | kubectl apply -f -
----
-apiVersion: networkaddonsoperator.network.kubevirt.io/v1
-kind: NetworkAddonsConfig
-metadata:
-  name: cluster
-spec:
-  imagePullPolicy: IfNotPresent
-  multus: {}
-  ovs: {}
-  kubeMacPool: {}
-EOF
-}
-
-function wait-network-operators() {
-    kubectl wait networkaddonsconfig cluster --for condition=Available --timeout=5m
-}
-
-function install-kubernetes-nmstate() {
-    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/nmstate.io_nmstates.yaml
-    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/namespace.yaml
-    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/service_account.yaml
-    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/role.yaml
-    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/role_binding.yaml
-    kubectl apply -f https://github.com/nmstate/kubernetes-nmstate/releases/download/${KUBERNETES_NMSTATE_VERSION}/operator.yaml
-    cat <<EOF | kubectl create -f -
-apiVersion: nmstate.io/v1
-kind: NMState
-metadata:
-  name: nmstate
-EOF
-}
-
-function wait-kubernetes-nmstate() {
-    kubectl rollout status -w -n nmstate ds nmstate-handler --timeout=2m
-    kubectl rollout status -w -n nmstate deployment nmstate-webhook --timeout=2m
 }
 
 function install-capk() {
@@ -147,29 +103,10 @@ function destroy-capk-cluster() {
 	kubectl delete cluster -n $cluster_name $cluster_name --ignore-not-found
 }
 
-function build-cni-plugin() {
-    (
-        cd ${ROOT_DIR}        
-        go build -o ${OUTPUT_DIR}/${PLUGIN_NAME} ./cmd/plugin
-	    chmod 755 ${OUTPUT_DIR}/${PLUGIN_NAME}
-    )
-}
-
-function install-cni-plugin(){
-    for node in $(kubectl get node --no-headers  -o custom-columns=":metadata.name")   
-    do
-        docker cp ${OUTPUT_DIR}/${PLUGIN_NAME}  ${node}:${CNI_DIR}
-        docker cp hack/ovs-vsctl  ${node}:/usr/local/bin
-        cp .out/kubeconfig .out/kubeconfig-internal
-        kubectl config --kubeconfig=.out/kubeconfig-internal set-cluster ovn-kubevirt --server=https://$(kubectl get svc kubernetes -o json |jq -r .spec.clusterIP)
-        docker cp .out/kubeconfig-internal ${node}:/etc/cni/net.d/ovn-kubevirt-kubeconfig
-    done
-}
-
 function install-cnv() {
-    install-network-operators
+    #install-network-operators
     install-kubevirt
-    wait-network-operators
+    #wait-network-operators
     wait-kubevirt
     #install-kubernetes-nmstate
     #wait-kubernetes-nmstate
@@ -177,26 +114,40 @@ function install-cnv() {
 
 function start-kind() {
     if ! ls ovn-kubernetes ; then 
-        git clone https://github.com/qinqon/ovn-kubernetes -b ovn-kubevirt
+        git clone https://github.com/qinqon/ovn-kubernetes -b spike-kubevirt-migration
     fi
+
+    # create registry container unless it already exists
+    reg_name='kind-registry'
+    reg_port='5000'
+    if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != 'true' ]; then
+      docker run \
+        -d --restart=always -p "127.0.0.1:${reg_port}:5000" --name "${reg_name}" \
+        registry:2
+    fi
+    
+    # connect the registry to the cluster network if not already connected
+    if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "${reg_name}")" = 'null' ]; then
+        docker network connect "kind" "${reg_name}"
+    fi
+
     pushd ovn-kubernetes
-        #pushd go-controller
-        #make
-        #popd
-
-        #pushd dist/images
-        #make fedora
-        #popd
-
         pushd contrib
-        ./kind.sh --cluster-name ovn-kubevirt
+        ./kind.sh --local-kind-registry --cluster-name ovn-kubevirt
         popd
     popd 
+
 }
 
 function deploy() {
     pushd ovn-kubernetes/contrib
-        ./kind.sh --cluster-name ovn-kubevirt --deploy
+        ./kind.sh --local-kind-registry --cluster-name ovn-kubevirt --deploy
+    popd
+}
+
+function deploy-kubevirt() {
+    pushd kubevirt
+        make DOCKER_PREFIX=localhost:5000/kubevirt cluster-patch
     popd
 }
 
@@ -206,13 +157,13 @@ function run() {
         docker exec -t $node bash -c "echo 'fs.inotify.max_user_watches=1048576' >> /etc/sysctl.conf"
         docker exec -t $node bash -c "echo 'fs.inotify.max_user_instances=512' >> /etc/sysctl.conf"
         docker exec -i $node bash -c "sysctl -p /etc/sysctl.conf"                      
-        docker exec "$node" sysctl --ignore net.ipv6.conf.all.disable_ipv6=0
-        docker exec "$node" sysctl --ignore net.ipv6.conf.all.forwarding=1
+        #docker exec "$node" sysctl --ignore net.ipv6.conf.all.disable_ipv6=0
+        #docker exec "$node" sysctl --ignore net.ipv6.conf.all.forwarding=1
         if [[ "${node}" =~ worker ]]; then
             kubectl label nodes $node node-role.kubernetes.io/worker="" --overwrite=true
         fi
-        docker exec $node apt-get update 
-        docker exec $node apt-get install -y tcpdump
+        #docker exec $node apt-get update 
+        #docker exec $node apt-get install -y tcpdump
     done             
     
     install-cnv

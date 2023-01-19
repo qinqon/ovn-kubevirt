@@ -5,8 +5,12 @@ go 1.18
 require (
 	github.com/containernetworking/cni v1.1.2
 	github.com/containernetworking/plugins v1.1.1
+	github.com/google/goexpect v0.0.0-20210430020637-ab937bf7fd6f
+	github.com/google/goterm v0.0.0-20200907032337-555d40f16ae2
 	github.com/ovn-org/libovsdb v0.6.1-0.20221101143603-8f21d188c3a5
 	github.com/ovn-org/ovn-kubernetes/go-controller v0.0.0-20221122221654-2cceeebd4f66
+	golang.org/x/crypto v0.0.0-20220315160706-3147a52a75dd
+	google.golang.org/grpc v1.49.0
 	k8s.io/api v0.25.2
 	k8s.io/apimachinery v0.25.2
 	k8s.io/client-go v0.25.0
@@ -67,7 +71,6 @@ require (
 	github.com/urfave/cli/v2 v2.2.0 // indirect
 	github.com/vishvananda/netlink v1.1.1-0.20211101163509-b10eb8fe5cf6 // indirect
 	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
-	golang.org/x/crypto v0.0.0-20220315160706-3147a52a75dd // indirect
 	golang.org/x/net v0.0.0-20221004154528-8021a29435af // indirect
 	golang.org/x/oauth2 v0.0.0-20220411215720-9780585627b5 // indirect
 	golang.org/x/sys v0.1.0 // indirect
@@ -75,6 +78,7 @@ require (
 	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/time v0.0.0-20220609170525-579cf78fd858 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
+	google.golang.org/genproto v0.0.0-20220502173005-c8bf987b8c21 // indirect
 	google.golang.org/protobuf v1.28.0 // indirect
 	gopkg.in/gcfg.v1 v1.2.3 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect

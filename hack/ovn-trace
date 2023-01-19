@@ -1,0 +1,2 @@
+#!/bin/bash -e
+kubectl exec -n ovn-kubernetes $(hack/control-plane) -c nb-ovsdb -- ovn-trace $@

@@ -2,29 +2,10 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: cluster1
----
-apiVersion: k8s.cni.cncf.io/v1
-kind: NetworkAttachmentDefinition
-metadata:
-  namespace: cluster1
-  name: ovn
-spec:
-  config: >
-    {
-        "cniVersion": "0.4.0",
-        "name": "cluster1",
-        "netAttachDefName": "cluster1/ovn",
-        "topology": "layer3",
-        "type": "ovn-k8s-cni-overlay",
-        "subnets": "10.128.1.0/24",
-        "dhcp": true,
-        "logFile": "/var/log/ovn-kubernetes/ovn-k8s-cni-overlay.log",
-        "logLevel": "5",
-        "logfile-maxsize": 100,
-        "logfile-maxbackups": 5,
-        "logfile-maxage": 5
-
-    }
+  labels:
+    pod-security.kubernetes.io/enforce: privileged             
+    pod-security.kubernetes.io/warn: privileged                
+    security.openshift.io/scc.podSecurityLabelSync: "false"
 ---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
@@ -37,6 +18,8 @@ spec:
   running: true
   template:
     metadata:
+      annotations:
+        kubevirt.io/allow-pod-bridge-network-live-migration: ""
       labels:
         kubevirt.io/vm: worker1
     spec: 
@@ -51,29 +34,36 @@ spec:
             name: cloudinitdisk
           interfaces:
           - bridge: {}
-            name: multus
+            name: pod
+          rng: {}
         resources:
           requests:
-            memory: 128Mi
+            memory: 1024M
       networks:
-      - name: multus
-        multus:
-          networkName: ovn
+      - name: pod
+        pod: {}
       terminationGracePeriodSeconds: 0
       volumes:
       - containerDisk:
-          image: quay.io/kubevirtci/alpine-with-test-tooling-container-disk:2211290730-4eb880c
+          image: quay.io/kubevirt/fedora-with-test-tooling-container-disk:devel
         name: containerdisk
       - cloudInitNoCloud:
-          networkData: |
-            version: 2
-            ethernets:
-              eth0:
-                dhcp4: true
           userData: |-
             #cloud-config
             password: fedora
             chpasswd: { expire: False }
-            runcmd:
-              - ip l set up dev lo
+            ssh_authorized_keys:
+              - 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIYrQWJKivTvTluDE13UkbWH6fFVertd/yTUgGvwTLaF ellorent@fedora'
         name: cloudinitdisk
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ssh-worker1
+  namespace: cluster1
+spec:
+  ports:
+  - port: 22
+  selector:
+    kubevirt.io/vm: worker1
+  type: NodePort

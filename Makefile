@@ -14,7 +14,7 @@ cluster-up:
 	hack/kind.sh run
 
 .PHONY: cluster-sync
-cluster-sync: plugin
+cluster-sync:
 	hack/kind.sh deploy
 
 .PHONY: test
@@ -22,16 +22,10 @@ test:
 	kubectl delete --ignore-not-found -f test/cluster1.yaml
 	kubectl apply -f test/cluster1.yaml
 
-.PHONY: plugin
-plugin:
-	hack/kind.sh build-cni-plugin
-
 .PHONY: capk
-capk:
-	hack/kind.sh install-capi
+install-capk:
 	hack/kind.sh install-capk
-	hack/kind.sh wait-capk
 	
 .PHONY: capk-cluster
-capk-cluster: capk
-	hack/kind.sh create-capk-cluster
+tenant-cluster: capk
+	hack/kind.sh create-tenant-cluster

@@ -1,0 +1,11 @@
+apiVersion: kubevirt.io/v1                                                      
+kind: KubeVirt                                                                  
+metadata:                                                                       
+  name: kubevirt                                                                
+  namespace: kubevirt                                                           
+spec:                                                                           
+  configuration:                                                                
+    migrations:                                                                 
+      allowPostCopy: true                                                       
+      completionTimeoutPerGiB: 1
+      bandwidthPerMigration: 40Mi

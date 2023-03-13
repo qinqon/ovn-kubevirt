@@ -5,9 +5,7 @@ metadata:
   namespace: kubevirt                                                           
 spec:                                                                           
   configuration:                                                                
-    seccompConfiguration:
-      virtualMachineInstanceProfile:
-        customProfile:
-          localhostProfile: kubevirt/kubevirt.json
     migrations:                                                                 
       allowPostCopy: true                                                       
+      completionTimeoutPerGiB: 1
+      bandwidthPerMigration: 40Mi

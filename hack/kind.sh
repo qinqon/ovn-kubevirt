@@ -13,9 +13,12 @@ KIND_CONFIG=${KIND_CONFIG:-${DIR}/kind-config.yaml}
 KUBERNETES_NMSTATE_VERSION=${KUBERNETES_NMSTATE_VERSION:-v0.74.0}
 export KUBEVIRT_PROVIDER=external
 export KUBECONFIG=$OUTPUT_DIR/kubeconfig
-export CAPK_RELEASE_VERSION="v0.1.0-rc.0"
+export CAPK_RELEASE_VERSION="v0.1.6"
 export KIND_IMAGE=${KIND_IMAGE:-quay.io/ellorent/kindest-node@sha256}
 export K8S_VERSION=${K8S_VERSION:-b79f78e961a23c05b5eb8a1c9e9a7b0d9f656ddec078e03f4ca24b1272791c52}
+export NODE_VM_IMAGE_TEMPLATE=quay.io/capk/ubuntu-2004-container-disk:v1.24.9
+export METALLB_VERSION="v0.13.9"
+export CALICO_VERSION="v3.21"
 
 CLUSTERCTL_PATH=$OUTPUT_DIR/clusterctl
 
@@ -32,11 +35,10 @@ function install-kubevirt() {
         git clone https://github.com/qinqon/kubevirt -b dnm-hypershift-kubevirt
     fi
     pushd kubevirt
-        export FEATURE_GATES=KubevirtSeccompProfile
         make DOCKER_PREFIX=localhost:5000/kubevirt cluster-sync
     popd
-    sudo sysctl -w vm.unprivileged_userfaultfd=1
-    kubectl apply -f hack/allow-post-copy-migration.yaml
+    #sudo sysctl -w vm.unprivileged_userfaultfd=1
+    #kubectl apply -f hack/allow-post-copy-migration.yaml
 }
 
 function wait-kubevirt() {
@@ -44,24 +46,33 @@ function wait-kubevirt() {
 }
 
 function install-capk() {
-    kubectl apply -f hack/capk.yaml
-}
-
-function wait-capk() {
+    clusterctl init -v 4 --config=hack/clusterctl_config.yaml    
+    kubectl apply -f https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/${CAPK_RELEASE_VERSION}/infrastructure-components.yaml
     kubectl wait -n capk-system --for=condition=Available=true deployment/capk-controller-manager --timeout=10m
 }
 
-function install-capi() {
-    if [ ! -f "${CLUSTERCTL_PATH}" ]; then                                          
-        curl -L https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.0.0/clusterctl-linux-amd64 -o ${CLUSTERCTL_PATH}
-        chmod u+x ${CLUSTERCTL_PATH}                                                
-    fi        
-    cat << EOF > ${OUTPUT_DIR}/clusterctl_config.yaml
+function install-metallb {
+    kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/${METALLB_VERSION}/config/manifests/metallb-native.yaml
+	kubectl -n metallb-system wait deployment controller --for condition=Available --timeout=5m
+
+	cat << EOF | kubectl apply -f  -
 ---
-cert-manager:
-  url: "https://github.com/cert-manager/cert-manager/releases/latest/cert-manager.yaml"
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ovn-kubevirt
+  namespace: metallb-system
+spec:
+  addresses:
+  - 172.18.0.201-172.18.0.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ovn-kubevirt
+  namespace: metallb-system
 EOF
-    $CLUSTERCTL_PATH init -v 4 --config=${OUTPUT_DIR}/clusterctl_config.yaml
+
 }
 
 function retry-until-success {
@@ -77,9 +88,26 @@ function retry-until-success {
 function vm-matches {
     local vm_namespace=$1
     local vm_name=$2
-    kubectl get vm -n ${TENANT_CLUSTER_NAMESPACE} --no-headers -o custom-columns=":metadata.name" | grep -q $vm_name
+    kubectl get vm -n cluster1 --no-headers -o custom-columns=":metadata.name" | grep -q $vm_name
 }
 
+function create-tenant-cluster() {
+	export CRI_PATH="/var/run/containerd/containerd.sock"
+	kubectl create namespace cluster1 || true
+    clusterctl generate cluster cluster1 --target-namespace cluster1 --kubernetes-version v1.24.9 --control-plane-machine-count=1 --worker-machine-count=1 --from hack/cluster-template.yaml | kubectl apply -f -
+	
+    kubectl wait cluster -n cluster1 cluster1 --for=condition=Ready --timeout=5m
+    clusterctl get kubeconfig -n cluster1 cluster1 > cluster1-kubeconfig
+    KUBECONFIG=cluster1-kubeconfig retry-until-success kubectl get pods -n kube-system
+	retry-until-success vm-matches cluster1 "cluster1-md-"
+    
+    KUBECONFIG=cluster1-kubeconfig kubectl apply -f https://docs.projectcalico.org/${CALICO_VERSION}/manifests/calico.yaml
+	KUBECONFIG=cluster1-kubeconfig kubectl rollout status ds/calico-node -n kube-system --timeout=2m
+}
+
+function destroy-tenant-cluster() {
+    kubectl delete cluster -n cluster1 cluster1 --ignore-not-found
+}
 
 function create-capk-cluster() {
 	
@@ -145,7 +173,7 @@ function deploy() {
     popd
 }
 
-function deploy-kubevirt() {
+function patch-kubevirt() {
     pushd kubevirt
         make DOCKER_PREFIX=localhost:5000/kubevirt cluster-patch
     popd
@@ -167,6 +195,9 @@ function run() {
     done             
     
     install-cnv
+    install-metallb
+    install-capk
+    create-tenant-cluster
 }
 
 $1

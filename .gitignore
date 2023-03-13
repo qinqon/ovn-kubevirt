@@ -15,3 +15,5 @@
 # vendor/
 
 ovn-kubernetes
+kubevirt
+*kubeconfig

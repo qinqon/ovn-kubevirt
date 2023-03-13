@@ -57,6 +57,7 @@ func main() {
 			max = elapsed
 		}
 		fmt.Printf("latency: %s, max: %s\n", elapsed, max)
+		time.Sleep(time.Second)
 	}
 
 	/*
